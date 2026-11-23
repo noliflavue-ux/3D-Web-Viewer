@@ -1,0 +1,6 @@
+{
+  "name": "AetherCAD Studio",
+  "description": "High-performance 3D CAD visualizer and editor for OpenSCAD (.scad), STL, and STEP files with spatial team annotations, point-to-point metrology, revision history, and secure public share links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
