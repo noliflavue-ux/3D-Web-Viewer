@@ -36,6 +36,7 @@ import {
 } from './utils/cadParser';
 import { sanitizeUserText, validateCADUpload } from './utils/securityScanner';
 import { soundEngine } from './utils/soundEngine';
+import { MATERIAL_SPECS, formatMassDisplay } from './utils/physicalProperties';
 import { CADViewport } from './components/CADViewport';
 import { ActiveDrawerTab, BottomGlassDock } from './components/BottomGlassDock';
 import { AuthGateModal } from './components/AuthGateModal';
@@ -54,10 +55,9 @@ import {
   Clock,
   Copy,
   Check,
-  Sparkles,
+  Sun,
+  Scale,
   RotateCw,
-  MessageSquare,
-  Ruler,
   Link2,
   ChevronDown,
   ChevronUp,
@@ -182,6 +182,7 @@ export default function App() {
   const [showDimensions, setShowDimensions] = useState<boolean>(
     workspaceSettings.autoBoundingBoxOnLoad
   );
+  const [showCenterOfMass, setShowCenterOfMass] = useState<boolean>(false);
   const [wireframe, setWireframe] = useState<boolean>(false);
   const [sideBySideExploded, setSideBySideExploded] = useState<boolean>(false);
   const [isAutoExploding, setIsAutoExploding] = useState<boolean>(false);
@@ -192,8 +193,10 @@ export default function App() {
     workspaceSettings.soundEffectsEnabled
   );
 
-  // Decluttered Top-Left Studio Card collapse state & quick copy feedback
-  const [isLeftRailExpanded, setIsLeftRailExpanded] = useState<boolean>(true);
+  // Decluttered Top-Left Studio Card collapse state (collapsed by default on narrow iPhone viewports)
+  const [isLeftRailExpanded, setIsLeftRailExpanded] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 640 : true
+  );
   const [quickLinkCopied, setQuickLinkCopied] = useState<boolean>(false);
 
   // Spatial Modals for Model Overview & Ablagen, Settings Control Center, SCAD Editor, and Time-Limited Share Link Hub
@@ -853,10 +856,10 @@ export default function App() {
           </a>
         </div>
 
-        {/* Zone 2: Clean Application-Level Navigation Links (Scales to 200+ Models) */}
+        {/* Zone 2: Clean Application-Level Navigation Links (4 uniform links, zero bordered buttons inside nav) */}
         <nav
           aria-label="Hauptnavigation"
-          className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600"
+          className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600"
         >
           <a
             href="#models-overview"
@@ -874,41 +877,26 @@ export default function App() {
                 : 'hover:text-slate-950'
             }`}
           >
-            Modell-Übersicht &amp; Ablagen ({projects.length})
+            Modelle &amp; Ablagen ({projects.length})
           </a>
 
-          <button
-            type="button"
-            onClick={() => {
-              soundEngine.playClick();
-              setIsModelsOverviewOpen(false);
-              setIsSettingsModalOpen(false);
-              setIsShareModalOpen(false);
-              setIsScadEditorOpen(true);
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl apple-glass-btn text-sky-700 font-semibold text-xs whitespace-nowrap shrink-0 cursor-pointer hover:bg-sky-50"
-          >
-            <Code2 className="w-3.5 h-3.5 text-sky-600" />
-            <span>+ SCAD Code einfügen</span>
-          </button>
-
           <a
-            href="#viewport-workspace"
+            href="#scad-editor"
             onClick={(e) => {
               e.preventDefault();
               soundEngine.playClick();
               setIsModelsOverviewOpen(false);
               setIsSettingsModalOpen(false);
               setIsShareModalOpen(false);
-              setIsScadEditorOpen(false);
+              setIsScadEditorOpen(true);
             }}
             className={`transition-colors whitespace-nowrap shrink-0 ${
-              !isModelsOverviewOpen && !isSettingsModalOpen && !isShareModalOpen && !isScadEditorOpen
+              isScadEditorOpen
                 ? 'text-sky-600 font-semibold underline underline-offset-8 decoration-2'
                 : 'hover:text-slate-950'
             }`}
           >
-            3D-Arbeitsbereich
+            SCAD-Editor
           </a>
 
           <a
@@ -927,7 +915,7 @@ export default function App() {
                 : 'hover:text-slate-950'
             }`}
           >
-            Shared-Links ({activeShareLinksCount})
+            Freigaben ({activeShareLinksCount})
           </a>
 
           <a
@@ -976,8 +964,8 @@ export default function App() {
             }}
             className="px-3 sm:px-4 py-1.5 sm:py-2 text-xs font-bold rounded-xl apple-glass-cta whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <span className="hidden xs:inline">Freigabelink teilen</span>
-            <span className="xs:hidden">Teilen</span>
+            <span className="hidden sm:inline">Freigabelink teilen</span>
+            <span className="sm:hidden">Teilen</span>
           </button>
         </div>
       </header>
@@ -1021,7 +1009,7 @@ export default function App() {
                 <Code2 className="w-4 h-4" />
                 <span>+ SCAD Code einfügen &amp; berechnen</span>
               </div>
-              <Sparkles className="w-4 h-4" />
+              <span className="font-mono text-[10px] opacity-90">.SCAD</span>
             </button>
 
             <button
@@ -1075,14 +1063,14 @@ export default function App() {
 
       {/* Main Spatial 3D Stage */}
       <main className="relative flex-1 w-full h-full overflow-hidden">
-        {/* Decluttered Top-Left Daylight Apple-Glass Studio Card */}
-        <div className="pointer-events-none absolute top-2.5 sm:top-4 left-2.5 sm:left-6 right-2.5 sm:right-auto z-20 w-auto sm:w-[min(390px,90vw)] space-y-2">
-          <div className="pointer-events-auto rounded-3xl apple-glass-panel p-3.5 sm:p-4 transition-all">
-            {/* Active Model Spec Header with Current Ablage (Folder) */}
+        {/* Decluttered Top-Left Daylight Apple-Glass Active Model Card */}
+        <div className="pointer-events-none absolute top-2.5 sm:top-4 left-2.5 sm:left-6 right-2.5 sm:right-auto z-20 w-auto sm:w-[min(368px,90vw)] space-y-2">
+          <div className="pointer-events-auto rounded-2xl sm:rounded-3xl apple-glass-panel p-3 sm:p-4 transition-all">
+            {/* Active Model Header with Current Ablage & Format */}
             <div className="flex items-start justify-between gap-2.5">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 text-[11px] text-slate-500 whitespace-nowrap overflow-hidden">
-                  <span className="inline-flex items-center gap-1 font-semibold text-slate-700 truncate max-w-[115px]">
+                  <span className="inline-flex items-center gap-1 font-semibold text-slate-700 truncate max-w-[130px]">
                     <Folder className="w-3 h-3 text-sky-600 shrink-0" />
                     <span className="truncate">{activeProjectFolder?.name.split(' ')[0]}</span>
                   </span>
@@ -1092,14 +1080,37 @@ export default function App() {
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>v{activeProject.currentVersion}.0</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono font-medium text-slate-800">
-                    {formatUnitDims(computedDimensions)}
-                  </span>
                 </div>
                 <h1 className="mt-0.5 text-sm sm:text-base font-bold text-slate-900 font-display tracking-tight leading-snug truncate">
                   {activeProject.name}
                 </h1>
+
+                {/* Glanceable Live Physical Spec Strip (click to open full Physics & Inertia drawer) */}
+                <button
+                  type="button"
+                  data-testid="card-physics-summary-btn"
+                  onClick={() => {
+                    soundEngine.playClick();
+                    setActiveDrawerTab(activeDrawerTab === 'metrology' ? 'none' : 'metrology');
+                  }}
+                  title="Klicken für Schwerpunkt, Masse & Trägheitstensor"
+                  className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-600 hover:text-sky-700 transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
+                >
+                  <Scale className="w-3 h-3 text-sky-600 shrink-0" />
+                  <span className="font-mono font-bold text-slate-900 tabular-nums">
+                    {computedDimensions.physical
+                      ? formatMassDisplay(computedDimensions.physical.massGrams)
+                      : '—'}
+                  </span>
+                  <span aria-hidden="true" className="text-slate-300">·</span>
+                  <span className="truncate">
+                    {(MATERIAL_SPECS[activeProject.finish] || MATERIAL_SPECS.titanium).shortName}
+                  </span>
+                  <span aria-hidden="true" className="text-slate-300">·</span>
+                  <span className="font-mono text-slate-500 tabular-nums">
+                    {formatUnitDims(computedDimensions)}
+                  </span>
+                </button>
               </div>
 
               <button
@@ -1120,7 +1131,7 @@ export default function App() {
             </div>
 
             {isLeftRailExpanded && (
-              <div className="mt-2.5 pt-2.5 border-t border-slate-200/80 space-y-2">
+              <div className="mt-2.5 pt-2.5 border-t border-slate-200/80 space-y-2.5">
                 {/* Clean Single-Row Shared-Link & Time-Limit Status */}
                 <div className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-2xl apple-glass-subcard text-xs">
                   <div className="flex items-center gap-1.5 min-w-0">
@@ -1172,8 +1183,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Clean Quick Action Bar */}
-                <div className="flex items-center justify-between gap-1 text-[11px] text-slate-600 whitespace-nowrap overflow-x-auto no-scrollbar">
+                {/* Streamlined Quick Action Row (No duplicates with Bottom Dock) */}
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600 whitespace-nowrap">
                   <button
                     type="button"
                     onClick={() => {
@@ -1183,10 +1194,8 @@ export default function App() {
                     className="flex items-center gap-1 font-semibold text-sky-700 hover:text-slate-950 cursor-pointer"
                   >
                     <FolderKanban className="w-3.5 h-3.5" />
-                    <span>Ablagen ({projects.length})</span>
+                    <span>Modelle ({projects.length})</span>
                   </button>
-
-                  <span className="text-slate-300" aria-hidden="true">·</span>
 
                   <button
                     type="button"
@@ -1200,8 +1209,6 @@ export default function App() {
                     <span>+ SCAD</span>
                   </button>
 
-                  <span className="text-slate-300" aria-hidden="true">·</span>
-
                   <button
                     type="button"
                     onClick={() => {
@@ -1213,44 +1220,6 @@ export default function App() {
                     <Upload className="w-3.5 h-3.5" />
                     <span>Import</span>
                   </button>
-
-                  <span className="text-slate-300" aria-hidden="true">·</span>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      soundEngine.playClick();
-                      setToolMode(toolMode === 'measure' ? 'orbit' : 'measure');
-                    }}
-                    className={`flex items-center gap-1 font-medium cursor-pointer ${
-                      toolMode === 'measure'
-                        ? 'text-amber-600 font-semibold underline'
-                        : 'hover:text-slate-950'
-                    }`}
-                  >
-                    <Ruler className="w-3.5 h-3.5" />
-                    <span>{toolMode === 'measure' ? 'Messen aktiv' : 'Messen'}</span>
-                  </button>
-
-                  <span className="text-slate-300" aria-hidden="true">·</span>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      soundEngine.playClick();
-                      setToolMode(toolMode === 'annotate' ? 'orbit' : 'annotate');
-                    }}
-                    className={`flex items-center gap-1 font-medium cursor-pointer ${
-                      toolMode === 'annotate'
-                        ? 'text-sky-600 font-semibold underline'
-                        : 'hover:text-slate-950'
-                    }`}
-                  >
-                    <MessageSquare className="w-3.5 h-3.5" />
-                    <span>3D-Pin</span>
-                  </button>
-
-                  <span className="text-slate-300" aria-hidden="true">·</span>
 
                   {publicShareMode ? (
                     <button
@@ -1302,17 +1271,17 @@ export default function App() {
           )}
         </div>
 
-        {/* Top-Right Floating Daylight Studio Atmosphere & Turntable Pill */}
-        <div className="pointer-events-auto absolute top-4 right-6 z-20 hidden lg:flex items-center gap-1.5 p-1.5 rounded-2xl apple-glass-panel text-xs">
-          <div className="flex items-center gap-1 px-2 text-slate-600">
-            <Sparkles className="w-3.5 h-3.5 text-sky-600" />
-            <span className="font-semibold">Studio:</span>
+        {/* Top-Right Floating Daylight Studio Atmosphere & Turntable Control */}
+        <div className="pointer-events-auto absolute top-4 right-6 z-20 hidden lg:flex items-center gap-1 p-1.5 rounded-2xl apple-glass-panel text-xs">
+          <div className="flex items-center gap-1 px-2 text-slate-500">
+            <Sun className="w-3.5 h-3.5 text-sky-600" />
+            <span className="font-semibold text-[11px]">Licht</span>
           </div>
 
           {(
             [
               { id: 'vision_spatial', label: 'Daylight' },
-              { id: 'titanium_dark', label: 'Silver Lab' },
+              { id: 'titanium_dark', label: 'Silver' },
               { id: 'blueprint_cryo', label: 'Blueprint' },
             ] as const
           ).map((t) => (
@@ -1337,6 +1306,7 @@ export default function App() {
 
           <button
             type="button"
+            title="Automatische 360°-Drehung"
             onClick={() => {
               soundEngine.playClick();
               setWorkspaceSettings((prev) => ({
@@ -1351,7 +1321,7 @@ export default function App() {
             }`}
           >
             <RotateCw className="w-3 h-3" />
-            <span>360° Turntable</span>
+            <span>360°</span>
           </button>
         </div>
 
@@ -1360,6 +1330,7 @@ export default function App() {
           project={activeProject}
           toolMode={toolMode}
           showDimensions={showDimensions}
+          showCenterOfMass={showCenterOfMass}
           showGridFloor={workspaceSettings.showGridFloor}
           studioTheme={currentStudioTheme}
           autoTurntable={Boolean(workspaceSettings.autoTurntable)}
@@ -1388,6 +1359,9 @@ export default function App() {
           onChangeToolMode={setToolMode}
           showDimensions={showDimensions}
           onToggleDimensions={() => setShowDimensions((prev) => !prev)}
+          showCenterOfMass={showCenterOfMass}
+          onToggleCenterOfMass={() => setShowCenterOfMass((prev) => !prev)}
+          unitSystem={workspaceSettings.unitSystem}
           wireframe={wireframe}
           onToggleWireframe={() => setWireframe((prev) => !prev)}
           sideBySideExploded={sideBySideExploded}

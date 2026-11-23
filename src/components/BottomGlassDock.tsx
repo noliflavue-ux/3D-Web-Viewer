@@ -9,6 +9,12 @@ import {
 } from '../types/cad';
 import { soundEngine } from '../utils/soundEngine';
 import {
+  MATERIAL_FINISH_LIST,
+  MATERIAL_SPECS,
+  formatMassDisplay,
+  formatTensorValue,
+} from '../utils/physicalProperties';
+import {
   ChevronDown,
   ChevronUp,
   Code2,
@@ -28,7 +34,8 @@ import {
   Columns2,
   Play,
   Pause,
-  Sparkles,
+  Crosshair,
+  Scale,
   X,
 } from 'lucide-react';
 
@@ -43,6 +50,9 @@ interface BottomGlassDockProps {
   onChangeToolMode: (mode: ToolMode) => void;
   showDimensions: boolean;
   onToggleDimensions: () => void;
+  showCenterOfMass: boolean;
+  onToggleCenterOfMass: () => void;
+  unitSystem?: 'mm' | 'inch';
   wireframe: boolean;
   onToggleWireframe: () => void;
   sideBySideExploded: boolean;
@@ -71,14 +81,6 @@ interface BottomGlassDockProps {
   onOpenScadEditor?: () => void;
 }
 
-const FINISH_OPTIONS: { id: MaterialFinish; label: string; swatchClass: string }[] = [
-  { id: 'titanium', label: 'Titan Grade 5', swatchClass: 'bg-slate-400' },
-  { id: 'anodized_blue', label: 'Eloxal Blau', swatchClass: 'bg-sky-500' },
-  { id: 'frosted_glass', label: 'Acrylglas', swatchClass: 'bg-cyan-300' },
-  { id: 'matte_polymer', label: 'Carbon-Polymer', swatchClass: 'bg-slate-700' },
-  { id: 'brushed_gold', label: 'Messing CuZn', swatchClass: 'bg-amber-400' },
-];
-
 export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
   project,
   isPublicReadonly,
@@ -88,6 +90,9 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
   onChangeToolMode,
   showDimensions,
   onToggleDimensions,
+  showCenterOfMass,
+  onToggleCenterOfMass,
+  unitSystem = 'mm',
   wireframe,
   onToggleWireframe,
   sideBySideExploded,
@@ -121,6 +126,11 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
   const [manualPtB, setManualPtB] = useState({ x: 20, y: 15, z: 0 });
 
   const report = latestSecurityReport || project.lastSecurityReport;
+  const activeMaterial = MATERIAL_SPECS[project.finish] || MATERIAL_SPECS.titanium;
+  const physical = dimensions.physical;
+  const lengthUnit = unitSystem === 'inch' ? 'in' : 'mm';
+  const formatLen = (mm: number) =>
+    unitSystem === 'inch' ? (mm / 25.4).toFixed(2) : mm.toFixed(1);
 
   const handleSaveRevision = (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,7 +155,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
 
   return (
     <div
-      className={`fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 z-30 w-[min(1040px,calc(100vw-0.75rem))] px-1 sm:px-0 transition-transform duration-200 ${
+      className={`fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 z-30 w-[min(1220px,calc(100vw-0.75rem))] px-0.5 sm:px-0 transition-transform duration-200 ${
         isDockCollapsed ? 'translate-y-[calc(100%-34px)]' : 'translate-y-0'
       }`}
     >
@@ -181,7 +191,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
           <div className="flex items-center justify-between pb-2 mb-3 border-b border-slate-200/80 sm:hidden">
             <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
               {activeTab === 'scad' && 'SCAD & Parameter'}
-              {activeTab === 'metrology' && 'Abmessungen & Messen'}
+              {activeTab === 'metrology' && 'Physik & Maße'}
               {activeTab === 'comments' && `3D-Pins (${project.comments.length})`}
               {activeTab === 'versions' && `Versionen (v${project.currentVersion})`}
               {activeTab === 'security' && 'Sicherheit'}
@@ -258,7 +268,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
                         }}
                         className="flex items-center gap-1 px-2.5 py-1 rounded-xl apple-glass-cta text-[11px] font-bold text-white cursor-pointer shadow-xs whitespace-nowrap"
                       >
-                        <Sparkles className="w-3 h-3" />
+                        <Plus className="w-3 h-3" />
                         <span>Neuen SCAD-Code einfügen</span>
                       </button>
                     )}
@@ -279,184 +289,412 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
             </div>
           )}
 
-          {/* TAB 2: Metrology & Dimensions */}
+          {/* TAB 2: Physical Properties (Mass, CoM, Inertia Tensor) & Metrology */}
           {activeTab === 'metrology' && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-5 space-y-4">
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <Box className="w-4 h-4 text-sky-600" />
-                  <span>Bauteil-Abmessungen (Bounding Box)</span>
-                </h3>
-                <div className="grid grid-cols-3 gap-2.5 text-center">
-                  <div className="p-3 rounded-xl apple-glass-subcard">
-                    <div className="text-[11px] text-slate-500">Breite (X)</div>
-                    <div className="text-sm font-mono font-bold text-slate-900 mt-0.5">
-                      {dimensions.width} mm
-                    </div>
-                  </div>
-                  <div className="p-3 rounded-xl apple-glass-subcard">
-                    <div className="text-[11px] text-slate-500">Höhe (Y)</div>
-                    <div className="text-sm font-mono font-bold text-slate-900 mt-0.5">
-                      {dimensions.height} mm
-                    </div>
-                  </div>
-                  <div className="p-3 rounded-xl apple-glass-subcard">
-                    <div className="text-[11px] text-slate-500">Tiefe (Z)</div>
-                    <div className="text-sm font-mono font-bold text-slate-900 mt-0.5">
-                      {dimensions.depth} mm
-                    </div>
-                  </div>
+            <div className="space-y-4">
+              {/* Top Row: Heading + Inline Material Density Selector */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-slate-200/80">
+                <div className="flex items-center gap-2">
+                  <Scale className="w-4 h-4 text-sky-600 shrink-0" />
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Physikalische Eigenschaften &amp; Bemaßung
+                  </h3>
                 </div>
 
-                <div className="flex items-center justify-between text-xs text-slate-600 pt-1">
-                  <span>Volumen: <strong className="font-mono text-slate-900">{dimensions.volumeCm3} cm³</strong></span>
-                  <span>Oberfläche: <strong className="font-mono text-slate-900">{dimensions.surfaceAreaCm2} cm²</strong></span>
-                  <span>Mesh: <strong className="font-mono text-slate-900">{dimensions.triangleCount} Tris</strong></span>
+                {/* Inline Material Switcher with Live Density (g/cm³) */}
+                <div
+                  className="flex items-center gap-1.5 overflow-x-auto no-scrollbar"
+                  role="group"
+                  aria-label="Werkstoff-Dichte wählen"
+                >
+                  {MATERIAL_FINISH_LIST.map((spec) => {
+                    const isActive = project.finish === spec.id;
+                    return (
+                      <button
+                        key={spec.id}
+                        type="button"
+                        data-testid={`physics-material-${spec.id}`}
+                        onClick={() => {
+                          soundEngine.playClick();
+                          onChangeFinish(spec.id);
+                        }}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-semibold transition-all cursor-pointer whitespace-nowrap ${
+                          isActive
+                            ? 'apple-glass-cta text-white'
+                            : 'apple-glass-btn text-slate-700 hover:text-slate-950'
+                        }`}
+                      >
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full ${spec.swatchClass} border ${
+                            isActive ? 'border-white/80' : 'border-slate-400/60'
+                          }`}
+                        />
+                        <span>{spec.shortName}</span>
+                        <span
+                          className={`font-mono text-[10px] ${
+                            isActive ? 'text-sky-100' : 'text-slate-500'
+                          }`}
+                        >
+                          {spec.densityGCm3.toFixed(2)}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-
-                <form onSubmit={handleManualMeasureSubmit} className="pt-3 border-t border-slate-200 space-y-2.5">
-                  <div className="text-xs font-semibold text-slate-800">
-                    Präzisions-Abstandsmessung per Koordinaten (oder direkt im 3D-Modell klicken)
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-                    <div className="flex items-center gap-1 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200">
-                      <span className="text-slate-400">P1:</span>
-                      <input
-                        type="number"
-                        aria-label="Punkt 1 X"
-                        value={manualPtA.x}
-                        onChange={(e) => setManualPtA({ ...manualPtA, x: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                      <input
-                        type="number"
-                        aria-label="Punkt 1 Y"
-                        value={manualPtA.y}
-                        onChange={(e) => setManualPtA({ ...manualPtA, y: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                      <input
-                        type="number"
-                        aria-label="Punkt 1 Z"
-                        value={manualPtA.z}
-                        onChange={(e) => setManualPtA({ ...manualPtA, z: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                    </div>
-                    <div className="flex items-center gap-1 bg-white px-2.5 py-1.5 rounded-lg border border-slate-200">
-                      <span className="text-slate-400">P2:</span>
-                      <input
-                        type="number"
-                        aria-label="Punkt 2 X"
-                        value={manualPtB.x}
-                        onChange={(e) => setManualPtB({ ...manualPtB, x: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                      <input
-                        type="number"
-                        aria-label="Punkt 2 Y"
-                        value={manualPtB.y}
-                        onChange={(e) => setManualPtB({ ...manualPtB, y: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                      <input
-                        type="number"
-                        aria-label="Punkt 2 Z"
-                        value={manualPtB.z}
-                        onChange={(e) => setManualPtB({ ...manualPtB, z: parseFloat(e.target.value) || 0 })}
-                        className="w-12 bg-transparent text-slate-900 text-right focus:outline-none"
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="submit"
-                      className="px-3 py-1.5 rounded-lg bg-amber-500 text-white font-semibold text-xs hover:bg-amber-600 transition-colors cursor-pointer"
-                    >
-                      Messstrecke hinzufügen
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundEngine.playClick();
-                        onChangeToolMode(toolMode === 'measure' ? 'orbit' : 'measure');
-                      }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
-                        toolMode === 'measure'
-                          ? 'apple-glass-cta text-white'
-                          : 'apple-glass-btn text-slate-700'
-                      }`}
-                    >
-                      {toolMode === 'measure' ? '3D-Klickmessung aktiv' : 'Im 3D-Modell abmessen'}
-                    </button>
-                  </div>
-                </form>
               </div>
 
-              <div className="lg:col-span-7 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-xs font-bold text-slate-800">
-                      Erfasste Punkt-zu-Punkt Messprotokolle ({project.measurements.length})
-                    </span>
-                    {project.measurements.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={onClearMeasurements}
-                        className="flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 font-semibold cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Messungen zurücksetzen</span>
-                      </button>
-                    )}
+              {/* Primary Physics KPI Strip */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+                <div className="p-3 rounded-2xl apple-glass-card">
+                  <div className="text-[11px] font-medium text-slate-500">Gesamtmasse</div>
+                  <div
+                    data-testid="physics-mass-value"
+                    className="text-base sm:text-lg font-mono font-bold text-slate-900 mt-0.5 tabular-nums"
+                  >
+                    {physical ? formatMassDisplay(physical.massGrams) : '—'}
                   </div>
-
-                  {project.measurements.length === 0 ? (
-                    <div className="p-6 rounded-xl apple-glass-subcard text-center text-xs text-slate-500">
-                      Noch keine Messstrecke gesetzt. Aktiviere „Messen“ im Dock und klicke zwei Punkte am 3D-Bauteil an.
-                    </div>
-                  ) : (
-                    <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                      {project.measurements.map((m, idx) => (
-                        <div
-                          key={m.id}
-                          className="flex items-center justify-between px-3.5 py-2.5 rounded-xl apple-glass-card text-xs font-mono"
-                        >
-                          <div>
-                            <span className="text-amber-700 font-bold">M{idx + 1}: {m.distanceMm.toFixed(2)} mm</span>
-                            <span className="text-slate-500 ml-3">
-                              ΔX {m.deltaX} · ΔY {m.deltaY} · ΔZ {m.deltaZ} mm
-                            </span>
-                          </div>
-                          <span className="text-[11px] text-slate-500">
-                            ({m.pointA.x},{m.pointA.y},{m.pointA.z}) → ({m.pointB.x},{m.pointB.y},{m.pointB.z})
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                    {physical ? `${physical.massKg.toFixed(4)} kg` : 'Berechnung läuft'}
+                  </div>
                 </div>
 
-                {/* Multi-Format CAD Export Bar */}
-                <div className="mt-4 pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-slate-600 flex items-center gap-1.5 font-medium">
-                    <Download className="w-3.5 h-3.5 text-sky-600" />
-                    <span>Direktexport der aktuellen Geometrie:</span>
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {(['stl', 'step', 'obj', 'scad'] as const).map((fmt) => (
+                <div className="p-3 rounded-2xl apple-glass-card">
+                  <div className="text-[11px] font-medium text-slate-500">Werkstoff &amp; Dichte</div>
+                  <div
+                    data-testid="physics-density-value"
+                    className="text-base sm:text-lg font-mono font-bold text-sky-700 mt-0.5 tabular-nums"
+                  >
+                    {(physical?.densityGCm3 ?? activeMaterial.densityGCm3).toFixed(2)} g/cm³
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                    {activeMaterial.name} ({activeMaterial.alloy})
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-2xl apple-glass-card">
+                  <div className="text-[11px] font-medium text-slate-500">Festkörper-Volumen</div>
+                  <div className="text-base sm:text-lg font-mono font-bold text-slate-900 mt-0.5 tabular-nums">
+                    {dimensions.volumeCm3.toFixed(2)} cm³
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                    {dimensions.triangleCount.toLocaleString('de-DE')} Dreiecke
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-2xl apple-glass-card">
+                  <div className="text-[11px] font-medium text-slate-500">Oberfläche &amp; Hüllmaß</div>
+                  <div className="text-base sm:text-lg font-mono font-bold text-slate-900 mt-0.5 tabular-nums">
+                    {dimensions.surfaceAreaCm2.toFixed(2)} cm²
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                    {formatLen(dimensions.width)} × {formatLen(dimensions.height)} ×{' '}
+                    {formatLen(dimensions.depth)} {lengthUnit}
+                  </div>
+                </div>
+              </div>
+
+              {/* Engineering Details: Left (Center of Mass + Measuring) | Right (3x3 Inertia Tensor + Export) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* Left Column: Center of Mass + Point-to-Point Measurement */}
+                <div className="lg:col-span-5 space-y-3">
+                  {/* Center of Mass Card */}
+                  <div
+                    data-testid="physics-com-card"
+                    className="p-3.5 rounded-2xl apple-glass-subcard space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                        <Crosshair className="w-3.5 h-3.5 text-orange-600" />
+                        <span>Schwerpunkt (Center of Mass)</span>
+                      </div>
                       <button
-                        key={fmt}
+                        type="button"
+                        data-testid="toggle-com-gizmo-btn"
+                        onClick={() => {
+                          soundEngine.playClick();
+                          onToggleCenterOfMass();
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                          showCenterOfMass
+                            ? 'bg-orange-600 text-white shadow-xs'
+                            : 'apple-glass-btn text-slate-700'
+                        }`}
+                      >
+                        {showCenterOfMass ? '3D-Marker aktiv' : 'Im 3D anzeigen'}
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-center font-mono">
+                      <div className="py-1.5 px-2 rounded-xl bg-white/90 border border-slate-200/80">
+                        <div className="text-[10px] font-semibold text-rose-600">X</div>
+                        <div className="text-xs font-bold text-slate-900 tabular-nums">
+                          {physical ? formatLen(physical.centerOfMassMm.x) : '0.0'} {lengthUnit}
+                        </div>
+                      </div>
+                      <div className="py-1.5 px-2 rounded-xl bg-white/90 border border-slate-200/80">
+                        <div className="text-[10px] font-semibold text-emerald-600">Y</div>
+                        <div className="text-xs font-bold text-slate-900 tabular-nums">
+                          {physical ? formatLen(physical.centerOfMassMm.y) : '0.0'} {lengthUnit}
+                        </div>
+                      </div>
+                      <div className="py-1.5 px-2 rounded-xl bg-white/90 border border-slate-200/80">
+                        <div className="text-[10px] font-semibold text-sky-600">Z</div>
+                        <div className="text-xs font-bold text-slate-900 tabular-nums">
+                          {physical ? formatLen(physical.centerOfMassMm.z) : '0.0'} {lengthUnit}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Point-to-Point Measurement Controls */}
+                  <form
+                    onSubmit={handleManualMeasureSubmit}
+                    className="p-3.5 rounded-2xl apple-glass-subcard space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <Ruler className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Abstandsmessung ({project.measurements.length})</span>
+                      </span>
+                      {project.measurements.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={onClearMeasurements}
+                          className="flex items-center gap-1 text-[11px] text-rose-600 hover:text-rose-700 font-semibold cursor-pointer"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono">
+                      <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-lg border border-slate-200">
+                        <span className="text-slate-400">P1</span>
+                        <input
+                          type="number"
+                          aria-label="Punkt 1 X"
+                          value={manualPtA.x}
+                          onChange={(e) => setManualPtA({ ...manualPtA, x: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                        <input
+                          type="number"
+                          aria-label="Punkt 1 Y"
+                          value={manualPtA.y}
+                          onChange={(e) => setManualPtA({ ...manualPtA, y: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                        <input
+                          type="number"
+                          aria-label="Punkt 1 Z"
+                          value={manualPtA.z}
+                          onChange={(e) => setManualPtA({ ...manualPtA, z: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1 bg-white px-2 py-1 rounded-lg border border-slate-200">
+                        <span className="text-slate-400">P2</span>
+                        <input
+                          type="number"
+                          aria-label="Punkt 2 X"
+                          value={manualPtB.x}
+                          onChange={(e) => setManualPtB({ ...manualPtB, x: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                        <input
+                          type="number"
+                          aria-label="Punkt 2 Y"
+                          value={manualPtB.y}
+                          onChange={(e) => setManualPtB({ ...manualPtB, y: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                        <input
+                          type="number"
+                          aria-label="Punkt 2 Z"
+                          value={manualPtB.z}
+                          onChange={(e) => setManualPtB({ ...manualPtB, z: parseFloat(e.target.value) || 0 })}
+                          className="w-10 bg-transparent text-slate-900 text-right focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="submit"
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 text-white font-semibold text-[11px] hover:bg-amber-600 transition-colors cursor-pointer"
+                      >
+                        Strecke setzen
+                      </button>
+                      <button
                         type="button"
                         onClick={() => {
-                          soundEngine.playSuccessChime();
-                          onExportFormat(fmt);
+                          soundEngine.playClick();
+                          onChangeToolMode(toolMode === 'measure' ? 'orbit' : 'measure');
                         }}
-                        className="px-3 py-1.5 rounded-lg apple-glass-btn hover:bg-sky-600 hover:text-white text-xs font-mono font-bold transition-colors cursor-pointer whitespace-nowrap"
+                        className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                          toolMode === 'measure'
+                            ? 'apple-glass-cta text-white'
+                            : 'apple-glass-btn text-slate-700'
+                        }`}
                       >
-                        .{fmt.toUpperCase()} Export
+                        {toolMode === 'measure' ? '3D-Messung aktiv' : 'Im 3D-Modell messen'}
                       </button>
-                    ))}
+                    </div>
+
+                    {project.measurements.length > 0 && (
+                      <div className="space-y-1.5 max-h-24 overflow-y-auto pt-1">
+                        {project.measurements.map((m, idx) => (
+                          <div
+                            key={m.id}
+                            className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-white/90 border border-slate-200/80 text-[11px] font-mono"
+                          >
+                            <span className="text-amber-700 font-bold">
+                              M{idx + 1}: {m.distanceMm.toFixed(2)} mm
+                            </span>
+                            <span className="text-slate-500">
+                              Δ({m.deltaX}, {m.deltaY}, {m.deltaZ})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </form>
+                </div>
+
+                {/* Right Column: Symmetric 3x3 Inertia Tensor about Center of Mass + Principal Moments + Export */}
+                <div className="lg:col-span-7 flex flex-col justify-between gap-3">
+                  <div
+                    data-testid="physics-inertia-matrix"
+                    className="p-3.5 rounded-2xl apple-glass-subcard space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                        <Box className="w-3.5 h-3.5 text-sky-600" />
+                        <span>
+                          Trägheitstensor am Schwerpunkt (I<sub className="text-[9px] font-mono">CoM</sub>)
+                        </span>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-500">Einheit: g·cm²</span>
+                    </div>
+
+                    {/* Clean 3x3 Engineering Matrix */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-right font-mono text-xs border-separate border-spacing-1">
+                        <thead>
+                          <tr className="text-[10px] text-slate-500 uppercase">
+                            <th className="w-10 text-left font-semibold px-1.5 py-0.5">Achse</th>
+                            <th className="text-right font-semibold px-2 py-0.5 text-rose-600">X</th>
+                            <th className="text-right font-semibold px-2 py-0.5 text-emerald-600">Y</th>
+                            <th className="text-right font-semibold px-2 py-0.5 text-sky-600">Z</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(
+                            [
+                              {
+                                axis: 'X',
+                                axisColor: 'text-rose-600',
+                                row: [
+                                  { label: 'Ixx', val: physical?.inertiaTensorGCm2.ixx ?? 0, diag: true },
+                                  { label: 'Ixy', val: physical?.inertiaTensorGCm2.ixy ?? 0, diag: false },
+                                  { label: 'Ixz', val: physical?.inertiaTensorGCm2.ixz ?? 0, diag: false },
+                                ],
+                              },
+                              {
+                                axis: 'Y',
+                                axisColor: 'text-emerald-600',
+                                row: [
+                                  { label: 'Iyx', val: physical?.inertiaTensorGCm2.ixy ?? 0, diag: false },
+                                  { label: 'Iyy', val: physical?.inertiaTensorGCm2.iyy ?? 0, diag: true },
+                                  { label: 'Iyz', val: physical?.inertiaTensorGCm2.iyz ?? 0, diag: false },
+                                ],
+                              },
+                              {
+                                axis: 'Z',
+                                axisColor: 'text-sky-600',
+                                row: [
+                                  { label: 'Izx', val: physical?.inertiaTensorGCm2.ixz ?? 0, diag: false },
+                                  { label: 'Izy', val: physical?.inertiaTensorGCm2.iyz ?? 0, diag: false },
+                                  { label: 'Izz', val: physical?.inertiaTensorGCm2.izz ?? 0, diag: true },
+                                ],
+                              },
+                            ] as const
+                          ).map((r) => (
+                            <tr key={r.axis}>
+                              <td className={`text-left font-bold px-1.5 py-1.5 ${r.axisColor}`}>
+                                {r.axis}
+                              </td>
+                              {r.row.map((cell) => (
+                                <td
+                                  key={cell.label}
+                                  className={`px-2.5 py-1.5 rounded-lg tabular-nums border ${
+                                    cell.diag
+                                      ? 'bg-sky-50/90 border-sky-200 text-slate-950 font-bold'
+                                      : 'bg-white/85 border-slate-200/70 text-slate-600'
+                                  }`}
+                                >
+                                  <span className="text-[9px] text-slate-400 mr-1.5 font-normal">
+                                    {cell.label}
+                                  </span>
+                                  <span>{formatTensorValue(cell.val)}</span>
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Principal Moments & Radii of Gyration */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2 border-t border-slate-200/80 text-[11px]">
+                      <div className="px-3 py-2 rounded-xl bg-white/85 border border-slate-200/70">
+                        <div className="text-[10px] text-slate-500 font-medium">
+                          Hauptmomente (I₁ · I₂ · I₃)
+                        </div>
+                        <div
+                          data-testid="physics-principal-moments"
+                          className="font-mono font-bold text-slate-900 tabular-nums mt-0.5 whitespace-nowrap"
+                        >
+                          {physical
+                            ? physical.principalMomentsGCm2.map((v) => formatTensorValue(v)).join(' · ')
+                            : '0 · 0 · 0'}
+                        </div>
+                      </div>
+                      <div className="px-3 py-2 rounded-xl bg-white/85 border border-slate-200/70">
+                        <div className="text-[10px] text-slate-500 font-medium">
+                          Trägheitsradien (r<sub className="text-[9px]">x</sub> · r<sub className="text-[9px]">y</sub> · r<sub className="text-[9px]">z</sub>)
+                        </div>
+                        <div className="font-mono font-semibold text-slate-900 tabular-nums mt-0.5 whitespace-nowrap">
+                          {physical
+                            ? `${physical.radiusOfGyrationMm.x.toFixed(1)} · ${physical.radiusOfGyrationMm.y.toFixed(1)} · ${physical.radiusOfGyrationMm.z.toFixed(1)} mm`
+                            : '—'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Multi-Format CAD Export Bar */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                    <span className="text-xs text-slate-600 flex items-center gap-1.5 font-medium">
+                      <Download className="w-3.5 h-3.5 text-sky-600" />
+                      <span>CAD-Direktexport:</span>
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {(['stl', 'step', 'obj', 'scad'] as const).map((fmt) => (
+                        <button
+                          key={fmt}
+                          type="button"
+                          onClick={() => {
+                            soundEngine.playSuccessChime();
+                            onExportFormat(fmt);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg apple-glass-btn hover:bg-sky-600 hover:text-white text-xs font-mono font-bold transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          .{fmt.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -701,41 +939,41 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
       )}
 
       {/* Primary Horizontal Daylight Apple-Glass Control Dock */}
-      <div className="px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl sm:rounded-3xl apple-glass-panel flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2.5 shadow-xl">
+      <div className="px-2.5 sm:px-3.5 py-2 rounded-2xl sm:rounded-3xl apple-glass-panel flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-2 shadow-xl">
         {/* Row 1 / Left: Interactive Tool Modes & Drawer Tabs */}
-        <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar pb-1 md:pb-0">
+        <div className="flex items-center justify-between sm:justify-start gap-1 shrink-0 pb-0.5 lg:pb-0">
           <button
             type="button"
             onClick={() => {
               soundEngine.playClick();
               onSelectTab(activeTab === 'scad' ? 'none' : 'scad');
             }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'scad'
                 ? 'apple-glass-cta text-white'
                 : 'text-slate-700 hover:bg-slate-200/60'
             }`}
           >
             <Code2 className="w-3.5 h-3.5" />
-            <span className="hidden xs:inline">SCAD &amp; Parameter</span>
-            <span className="xs:hidden">SCAD</span>
+            <span>SCAD</span>
           </button>
 
           <button
             type="button"
+            data-testid="dock-physics-tab-btn"
             onClick={() => {
               soundEngine.playClick();
               onSelectTab(activeTab === 'metrology' ? 'none' : 'metrology');
             }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'metrology' || toolMode === 'measure'
                 ? 'bg-amber-500 text-white'
                 : 'text-slate-700 hover:bg-slate-200/60'
             }`}
           >
-            <Ruler className="w-3.5 h-3.5" />
-            <span className="hidden xs:inline">Abmessungen &amp; Messen</span>
-            <span className="xs:hidden">Messen</span>
+            <Scale className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Physik &amp; Maße</span>
+            <span className="sm:hidden">Physik</span>
           </button>
 
           <button
@@ -744,7 +982,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
               soundEngine.playClick();
               onSelectTab(activeTab === 'comments' ? 'none' : 'comments');
             }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'comments' || toolMode === 'annotate'
                 ? 'apple-glass-cta text-white'
                 : 'text-slate-700 hover:bg-slate-200/60'
@@ -760,7 +998,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
               soundEngine.playClick();
               onSelectTab(activeTab === 'versions' ? 'none' : 'versions');
             }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'versions'
                 ? 'apple-glass-cta text-white'
                 : 'text-slate-700 hover:bg-slate-200/60'
@@ -776,20 +1014,22 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
               soundEngine.playClick();
               onSelectTab(activeTab === 'security' ? 'none' : 'security');
             }}
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+            aria-label="Zero-Trust Upload-Sicherheitsprüfung"
+            title="Zero-Trust Upload-Sicherheitsprüfung"
+            className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'security'
                 ? 'bg-emerald-600 text-white'
                 : 'text-slate-700 hover:bg-slate-200/60'
             }`}
           >
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-            <span className="hidden xs:inline">Sicherheit</span>
+            <ShieldCheck className={`w-3.5 h-3.5 ${activeTab === 'security' ? 'text-white' : 'text-emerald-600'}`} />
+            <span className="hidden xl:inline">Schutz</span>
           </button>
         </div>
 
-        {/* Row 2 / Center & Right: Explosion Slider, Swatches & Camera Views */}
-        <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar pt-1.5 md:pt-0 border-t md:border-t-0 border-slate-200/70">
-          <div className="flex items-center gap-1.5 shrink-0">
+        {/* Row 2 / Center & Right: Explosion, Material Finish Swatches & Viewport Helpers */}
+        <div className="flex items-center justify-between gap-1.5 sm:gap-2.5 pt-1.5 lg:pt-0 border-t lg:border-t-0 border-slate-200/70">
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => {
@@ -797,15 +1037,14 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
                 onToggleSideBySideExploded();
               }}
               aria-pressed={sideBySideExploded}
-              className={`flex items-center gap-1 px-2 sm:px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
                 sideBySideExploded
                   ? 'apple-glass-cta text-white'
                   : 'apple-glass-btn text-slate-700'
               }`}
             >
               <Columns2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Side-by-Side Explosion</span>
-              <span className="sm:hidden">Explosion</span>
+              <span>Explosion</span>
             </button>
 
             <button
@@ -836,31 +1075,35 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
               step={0.02}
               value={project.explodedFactor}
               onChange={(e) => onChangeExploded(parseFloat(e.target.value))}
-              className="w-16 sm:w-20 accent-sky-600 cursor-pointer"
+              className="w-11 sm:w-16 accent-sky-600 cursor-pointer"
             />
           </div>
 
-          <div className="hidden sm:flex items-center gap-1.5 shrink-0" role="group" aria-label="Oberflächen-Finish">
-            {FINISH_OPTIONS.map((fin) => (
+          <div
+            className="hidden md:flex items-center gap-1.5 shrink-0"
+            role="group"
+            aria-label="Material-Finish & Dichte"
+          >
+            {MATERIAL_FINISH_LIST.map((fin) => (
               <button
                 key={fin.id}
                 type="button"
-                title={fin.label}
-                aria-label={`Material ${fin.label}`}
+                title={`${fin.name} (${fin.densityGCm3.toFixed(2)} g/cm³)`}
+                aria-label={`Material ${fin.name}, Dichte ${fin.densityGCm3} g/cm³`}
                 onClick={() => {
                   soundEngine.playClick();
                   onChangeFinish(fin.id);
                 }}
-                className={`w-5 h-5 rounded-full ${fin.swatchClass} border transition-transform cursor-pointer ${
+                className={`w-4.5 h-4.5 rounded-full ${fin.swatchClass} border transition-transform cursor-pointer ${
                   project.finish === fin.id
-                    ? 'border-slate-900 scale-125 ring-2 ring-sky-500/60'
+                    ? 'border-slate-900 scale-115 ring-2 ring-sky-500/60'
                     : 'border-slate-400/50 opacity-80 hover:opacity-100'
                 }`}
               />
             ))}
           </div>
 
-          {/* Right: Camera Views, BBox Toggle, Wireframe & Audio */}
+          {/* Right: Camera Presets, CoM, BBox, Wireframe & Audio */}
           <div className="flex items-center gap-1 shrink-0">
             {(['iso', 'front', 'top', 'right'] as const).map((preset) => (
               <button
@@ -870,7 +1113,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
                   soundEngine.playClick();
                   onSelectCameraPreset(preset);
                 }}
-                className="px-1.5 sm:px-2 py-1 rounded-lg apple-glass-btn text-[10px] sm:text-[11px] font-mono font-semibold uppercase text-slate-700 cursor-pointer"
+                className="hidden sm:inline-flex px-1.5 py-1 rounded-lg apple-glass-btn text-[10px] font-mono font-semibold uppercase text-slate-700 cursor-pointer"
               >
                 {preset}
               </button>
@@ -878,17 +1121,35 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
 
             <button
               type="button"
+              data-testid="dock-com-toggle-btn"
+              title="3D-Schwerpunkt (Center of Mass) ein-/ausblenden"
+              onClick={() => {
+                soundEngine.playClick();
+                onToggleCenterOfMass();
+              }}
+              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer whitespace-nowrap ${
+                showCenterOfMass
+                  ? 'bg-orange-100 text-orange-800 border-orange-400'
+                  : 'apple-glass-btn text-slate-600'
+              }`}
+            >
+              <Crosshair className="w-3 h-3" />
+              <span>CoM</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => {
                 soundEngine.playClick();
                 onToggleDimensions();
               }}
-              className={`px-2 py-1 rounded-lg text-[10px] sm:text-[11px] font-semibold border cursor-pointer whitespace-nowrap ${
+              className={`px-1.5 sm:px-2 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer whitespace-nowrap ${
                 showDimensions
                   ? 'bg-sky-100 text-sky-800 border-sky-400'
                   : 'apple-glass-btn text-slate-600'
               }`}
             >
-              Maßbox
+              Box
             </button>
 
             <button
@@ -897,7 +1158,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
                 soundEngine.playClick();
                 onToggleWireframe();
               }}
-              className={`px-2 py-1 rounded-lg text-[10px] sm:text-[11px] font-semibold border cursor-pointer whitespace-nowrap ${
+              className={`px-1.5 sm:px-2 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer whitespace-nowrap ${
                 wireframe
                   ? 'bg-sky-100 text-sky-800 border-sky-400'
                   : 'apple-glass-btn text-slate-600'
@@ -910,7 +1171,7 @@ export const BottomGlassDock: React.FC<BottomGlassDockProps> = ({
               type="button"
               onClick={onToggleSound}
               aria-label={soundEnabled ? 'UI-Sounds stummschalten' : 'UI-Sounds aktivieren'}
-              className="p-1 sm:p-1.5 rounded-lg apple-glass-btn text-slate-700 cursor-pointer"
+              className="hidden sm:inline-flex p-1.5 rounded-lg apple-glass-btn text-slate-700 cursor-pointer"
             >
               {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-sky-600" /> : <VolumeX className="w-3.5 h-3.5 text-slate-400" />}
             </button>

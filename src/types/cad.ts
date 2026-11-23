@@ -34,6 +34,38 @@ export interface Vector3Tuple {
   z: number;
 }
 
+export interface MaterialSpec {
+  id: MaterialFinish;
+  name: string;
+  shortName: string;
+  alloy: string;
+  densityGCm3: number; // g/cm³
+  swatchClass: string;
+}
+
+export interface InertiaTensor {
+  // Symmetric 3x3 inertia tensor about the Center of Mass in g·cm²
+  ixx: number;
+  iyy: number;
+  izz: number;
+  ixy: number;
+  ixz: number;
+  iyz: number;
+}
+
+export interface PhysicalProperties {
+  material: MaterialSpec;
+  densityGCm3: number;
+  volumeCm3: number;
+  surfaceAreaCm2: number;
+  massGrams: number;
+  massKg: number;
+  centerOfMassMm: Vector3Tuple;
+  inertiaTensorGCm2: InertiaTensor;
+  principalMomentsGCm2: [number, number, number];
+  radiusOfGyrationMm: Vector3Tuple;
+}
+
 export interface BoundingDimensions {
   width: number;
   height: number;
@@ -41,6 +73,7 @@ export interface BoundingDimensions {
   volumeCm3: number;
   surfaceAreaCm2: number;
   triangleCount: number;
+  physical?: PhysicalProperties;
 }
 
 export interface SpatialComment {

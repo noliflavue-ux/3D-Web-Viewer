@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { MaterialFinish, CADModelProject, BoundingDimensions } from '../types/cad';
 import { parseScadCode, parseStepFileMetrics, calculateSeparationVector } from './cadParser';
+import { computeMeshPhysicalProperties } from './physicalProperties';
 
 /**
  * Creates a calibrated PBR material set with varied roughness/metalness across sub-parts
@@ -230,7 +231,7 @@ export function buildCADAssemblyGroup(
         rootGroup.add(lockRing);
 
         const innerSleeve = new THREE.Mesh(
-          new THREE.CylinderGeometry(boreRadius, boreRadius, hubH + 3, 32, 1, true),
+          new THREE.CylinderGeometry(boreRadius, boreRadius, hubH + 3, 32, 1, false),
           createPartMaterial('matte_polymer', 4, isSoftwareGl, wireframe)
         );
         innerSleeve.position.y = (hubH + 3) / 2;
@@ -426,6 +427,7 @@ export function buildCADAssemblyGroup(
         const dirAngle = (prim.partGroup * 1.7) % (Math.PI * 2);
         mesh.userData = {
           partGroup: prim.partGroup,
+          isSubtractPreview: isSub,
           basePos: mesh.position.clone(),
           explodeVec: new THREE.Vector3(
             Math.cos(dirAngle) * 14,
@@ -442,6 +444,7 @@ export function buildCADAssemblyGroup(
   const box = new THREE.Box3();
   let triangleCount = 0;
   const vertexChunks: number[] = [];
+  const solidVertexChunks: number[] = [];
   const tempVec = new THREE.Vector3();
 
   rootGroup.updateMatrixWorld(true);
@@ -450,6 +453,7 @@ export function buildCADAssemblyGroup(
       const mesh = obj as THREE.Mesh;
       mesh.castShadow = !isSoftwareGl;
       mesh.receiveShadow = !isSoftwareGl;
+      const isSubtractPreview = Boolean(mesh.userData?.isSubtractPreview);
       const geom = mesh.geometry;
       const posAttr = geom.attributes.position;
       if (posAttr) {
@@ -460,6 +464,9 @@ export function buildCADAssemblyGroup(
             tempVec.fromBufferAttribute(posAttr, indexAttr.getX(i));
             tempVec.applyMatrix4(mesh.matrixWorld);
             vertexChunks.push(tempVec.x, tempVec.y, tempVec.z);
+            if (!isSubtractPreview) {
+              solidVertexChunks.push(tempVec.x, tempVec.y, tempVec.z);
+            }
           }
         } else {
           triangleCount += posAttr.count / 3;
@@ -467,6 +474,9 @@ export function buildCADAssemblyGroup(
             tempVec.fromBufferAttribute(posAttr, i);
             tempVec.applyMatrix4(mesh.matrixWorld);
             vertexChunks.push(tempVec.x, tempVec.y, tempVec.z);
+            if (!isSubtractPreview) {
+              solidVertexChunks.push(tempVec.x, tempVec.y, tempVec.z);
+            }
           }
         }
       }
@@ -514,12 +524,9 @@ export function buildCADAssemblyGroup(
   const height = Number(Math.max(1, size.y).toFixed(1));
   const depth = Number(Math.max(1, size.z).toFixed(1));
 
-  // Estimate volume (cm3) and surface area (cm2) assuming 1 unit = 1 mm
-  const rawBoxVolCm3 = (width * height * depth) / 1000;
-  const volumeCm3 = Number((rawBoxVolCm3 * 0.46).toFixed(2));
-  const surfaceAreaCm2 = Number(
-    ((2 * (width * height + width * depth + height * depth)) / 100 * 0.78).toFixed(2)
-  );
+  // Compute exact mesh-integrated physical properties (volume, surface area, mass, CoM, inertia tensor)
+  const solidPositions = new Float32Array(solidVertexChunks.length > 0 ? solidVertexChunks : vertexChunks);
+  const physical = computeMeshPhysicalProperties(solidPositions, project.finish);
 
   return {
     group: rootGroup,
@@ -527,9 +534,10 @@ export function buildCADAssemblyGroup(
       width,
       height,
       depth,
-      volumeCm3,
-      surfaceAreaCm2,
+      volumeCm3: physical.volumeCm3,
+      surfaceAreaCm2: physical.surfaceAreaCm2,
       triangleCount: Math.round(triangleCount),
+      physical,
     },
     exportPositions: new Float32Array(vertexChunks),
   };

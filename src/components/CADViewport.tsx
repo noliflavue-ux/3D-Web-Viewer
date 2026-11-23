@@ -18,6 +18,7 @@ interface CADViewportProps {
   project: CADModelProject;
   toolMode: ToolMode;
   showDimensions: boolean;
+  showCenterOfMass?: boolean;
   showGridFloor?: boolean;
   studioTheme?: StudioTheme;
   autoTurntable?: boolean;
@@ -48,6 +49,7 @@ export const CADViewport: React.FC<CADViewportProps> = ({
   project,
   toolMode,
   showDimensions,
+  showCenterOfMass = false,
   showGridFloor = true,
   studioTheme = 'vision_spatial',
   autoTurntable = false,
@@ -73,6 +75,11 @@ export const CADViewport: React.FC<CADViewportProps> = ({
 
   const showDimensionsRef = useRef<boolean>(showDimensions);
   showDimensionsRef.current = showDimensions;
+
+  const showCenterOfMassRef = useRef<boolean>(showCenterOfMass);
+  showCenterOfMassRef.current = showCenterOfMass;
+
+  const currentComRef = useRef<Vector3Tuple | null>(null);
 
   const sideBySideRef = useRef<boolean>(sideBySideExploded);
   sideBySideRef.current = sideBySideExploded;
@@ -111,6 +118,12 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     distanceMm: number;
     visible: boolean;
   } | null>(null);
+  const [projectedCom, setProjectedCom] = useState<{
+    x: number;
+    y: number;
+    visible: boolean;
+    coords: Vector3Tuple;
+  } | null>(null);
 
   // Store Three.js scene API in a ref so prop updates trigger coalesced requestRender()
   const sceneApiRef = useRef<{
@@ -118,6 +131,7 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     updateExplodedTarget: (factor: number) => void;
     updateSideBySideMode: () => void;
     updateDimensionVisibility: (visible: boolean) => void;
+    updateCenterOfMassVisibility: (visible: boolean) => void;
     updateStudioEnvironment: (theme: StudioTheme, gridVisible: boolean, turntable: boolean) => void;
     updateMeasurementLines: () => void;
     flyToPreset: (preset: CameraPreset) => void;
@@ -279,6 +293,9 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     const bboxHelperGroup = new THREE.Group();
     scene.add(bboxHelperGroup);
 
+    const comHelperGroup = new THREE.Group();
+    scene.add(comHelperGroup);
+
     const measurementLinesGroup = new THREE.Group();
     scene.add(measurementLinesGroup);
 
@@ -366,6 +383,22 @@ export const CADViewport: React.FC<CADViewportProps> = ({
         };
       });
       setProjectedMeasures(nextMeasures);
+
+      // Project 3D Center of Mass (CoM) callout badge when enabled
+      const activeCom = currentComRef.current;
+      if (showCenterOfMassRef.current && activeCom) {
+        _projVec.set(activeCom.x, activeCom.y + 4.5, activeCom.z);
+        _projVec.project(camera);
+        const screenX = ((_projVec.x + 1) / 2) * paneW;
+        setProjectedCom({
+          x: screenX,
+          y: (-(_projVec.y - 1) / 2) * h,
+          visible: _projVec.z <= 1 && screenX >= 0 && screenX <= paneW,
+          coords: activeCom,
+        });
+      } else {
+        setProjectedCom(null);
+      }
     }
 
     function rebuildSeparationVectorLines(factor: number) {
@@ -556,6 +589,51 @@ export const CADViewport: React.FC<CADViewportProps> = ({
       bboxHelperGroup.add(helper);
     }
 
+    // Helper to build precision 3D Center of Mass (Schwerpunkt) engineering gizmo
+    function rebuildCenterOfMassGizmo(com: Vector3Tuple | null) {
+      comHelperGroup.clear();
+      if (!showCenterOfMassRef.current || !com) return;
+
+      const anchor = new THREE.Group();
+      anchor.position.set(com.x, com.y, com.z);
+
+      const coreMat = new THREE.MeshBasicMaterial({ color: 0xea580c, depthTest: false });
+      const coreSphere = new THREE.Mesh(new THREE.SphereGeometry(2.0, 20, 20), coreMat);
+      coreSphere.renderOrder = 1002;
+      anchor.add(coreSphere);
+
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x0f172a,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.85,
+      });
+      const ringXY = new THREE.Mesh(new THREE.TorusGeometry(3.3, 0.32, 10, 32), ringMat);
+      ringXY.renderOrder = 1001;
+      anchor.add(ringXY);
+
+      const ringXZ = new THREE.Mesh(new THREE.TorusGeometry(3.3, 0.32, 10, 32), ringMat);
+      ringXZ.rotation.x = Math.PI / 2;
+      ringXZ.renderOrder = 1001;
+      anchor.add(ringXZ);
+
+      const axisLen = 14;
+      const axes: [THREE.Vector3, THREE.Vector3, number][] = [
+        [new THREE.Vector3(-axisLen, 0, 0), new THREE.Vector3(axisLen, 0, 0), 0xef4444],
+        [new THREE.Vector3(0, -axisLen, 0), new THREE.Vector3(0, axisLen, 0), 0x10b981],
+        [new THREE.Vector3(0, 0, -axisLen), new THREE.Vector3(0, 0, axisLen), 0x0284c7],
+      ];
+      for (const [start, end, hex] of axes) {
+        const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
+        const mat = new THREE.LineBasicMaterial({ color: hex, depthTest: false });
+        const line = new THREE.Line(geo, mat);
+        line.renderOrder = 1000;
+        anchor.add(line);
+      }
+
+      comHelperGroup.add(anchor);
+    }
+
     // Helper to rebuild saved measurement lines in 3D space
     function rebuildMeasurementLines() {
       measurementLinesGroup.clear();
@@ -587,8 +665,10 @@ export const CADViewport: React.FC<CADViewportProps> = ({
       cadModelHolder.clear();
       const built = buildCADAssemblyGroup(projectRef.current, isSoftwareGl, wireframe);
       cadModelHolder.add(built.group);
+      currentComRef.current = built.dimensions.physical?.centerOfMassMm ?? null;
       applyExplodedPositions(currentExploded);
       rebuildBoundingOverlay(built.group);
+      rebuildCenterOfMassGizmo(currentComRef.current);
       rebuildMeasurementLines();
       onMetricsComputedRef.current(built.dimensions, built.exportPositions);
       requestRender();
@@ -783,6 +863,12 @@ export const CADViewport: React.FC<CADViewportProps> = ({
         if (root) rebuildBoundingOverlay(root);
         requestRender();
       },
+      updateCenterOfMassVisibility: (visible: boolean) => {
+        showCenterOfMassRef.current = visible;
+        rebuildCenterOfMassGizmo(currentComRef.current);
+        updateProjectedOverlays();
+        requestRender();
+      },
       updateStudioEnvironment: (
         theme: StudioTheme,
         gridVisible: boolean,
@@ -867,6 +953,11 @@ export const CADViewport: React.FC<CADViewportProps> = ({
   useEffect(() => {
     sceneApiRef.current?.updateDimensionVisibility(showDimensions);
   }, [showDimensions]);
+
+  // Trigger 3D Center of Mass (CoM) gizmo visibility
+  useEffect(() => {
+    sceneApiRef.current?.updateCenterOfMassVisibility(showCenterOfMass);
+  }, [showCenterOfMass]);
 
   // Trigger studio environment theme, grid visibility, and turntable auto-rotation
   useEffect(() => {
@@ -1047,6 +1138,20 @@ export const CADViewport: React.FC<CADViewportProps> = ({
               {m.distanceMm.toFixed(2)} mm
             </div>
           ) : null
+        )}
+
+        {/* Projected 3D Center of Mass (CoM) Callout Badge */}
+        {showCenterOfMass && projectedCom && projectedCom.visible && (
+          <div
+            data-testid="viewport-com-badge"
+            style={{
+              transform: `translate3d(${Math.round(projectedCom.x)}px, ${Math.round(projectedCom.y)}px, 0)`,
+            }}
+            className="absolute top-0 left-0 -translate-x-1/2 -translate-y-full -mt-2 px-2.5 py-1 rounded-lg bg-white/95 border border-orange-500/60 text-[11px] font-mono font-bold text-orange-700 shadow-md whitespace-nowrap"
+          >
+            CoM ({projectedCom.coords.x.toFixed(1)}, {projectedCom.coords.y.toFixed(1)},{' '}
+            {projectedCom.coords.z.toFixed(1)}) mm
+          </div>
         )}
 
         {/* Live Preview Distance Callout while Measuring */}
