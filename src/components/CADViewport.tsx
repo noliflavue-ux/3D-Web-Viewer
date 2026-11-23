@@ -185,7 +185,7 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     pmremGenerator.dispose();
 
-    const camera = new THREE.PerspectiveCamera(40, width / height, 0.5, 1200);
+    const camera = new THREE.PerspectiveCamera(40, width / height, 0.2, 4000);
     camera.position.set(92, 68, 102);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -194,8 +194,8 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     controls.dampingFactor = 0.07;
     controls.autoRotate = autoTurntableRef.current;
     controls.autoRotateSpeed = 1.6;
-    controls.minDistance = 22;
-    controls.maxDistance = 420;
+    controls.minDistance = 8;
+    controls.maxDistance = 1200;
     controls.maxPolarAngle = Math.PI / 2 + 0.15;
 
     // 3. Bright Daylight Architectural Studio Lighting Rig
@@ -310,6 +310,9 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     let cameraTransitionActive = false;
     const targetCamPos = new THREE.Vector3();
     const targetCamLook = new THREE.Vector3(0, 18, 0);
+    let lastFramedProjectId = '';
+    const activeModelCenter = new THREE.Vector3(0, 17, 0);
+    let activeModelRadius = 48;
 
     controls.addEventListener('start', () => {
       cameraTransitionActive = false;
@@ -660,6 +663,52 @@ export const CADViewport: React.FC<CADViewportProps> = ({
       }
     }
 
+    // Auto-frame camera and studio turntable rings for models of any physical scale
+    function frameCameraToModel(targetObj: THREE.Object3D, instant: boolean) {
+      const box = new THREE.Box3().setFromObject(targetObj);
+      if (box.isEmpty()) return;
+
+      const center = new THREE.Vector3();
+      const sphere = new THREE.Sphere();
+      box.getCenter(center);
+      box.getBoundingSphere(sphere);
+
+      const radius = Math.max(6, sphere.radius);
+      activeModelCenter.copy(center);
+      activeModelRadius = radius;
+
+      // Adapt zoom limits and camera clip planes to the model's physical scale
+      const fovRad = THREE.MathUtils.degToRad(camera.fov);
+      const fitDist = Math.max(24, (radius / Math.sin(fovRad / 2)) * 1.38);
+      controls.minDistance = Math.max(4, radius * 0.45);
+      controls.maxDistance = Math.max(420, fitDist * 4.5);
+      camera.near = Math.max(0.1, radius * 0.008);
+      camera.far = Math.max(1800, fitDist * 14);
+      camera.updateProjectionMatrix();
+
+      // Adapt floor turntable rings & contact shadow cleanly to model footprint
+      const scaleRatio = THREE.MathUtils.clamp(radius / 46, 0.35, 5.0);
+      innerRing.scale.set(scaleRatio, scaleRatio, 1);
+      outerRing.scale.set(scaleRatio, scaleRatio, 1);
+      contactDisc.scale.set(scaleRatio, scaleRatio, 1);
+      gridHelper.scale.set(scaleRatio, 1, scaleRatio);
+
+      // Isometric studio camera direction (normalized ~ [0.60, 0.45, 0.66])
+      const isoDir = new THREE.Vector3(0.60, 0.44, 0.66).normalize();
+      const desiredPos = center.clone().addScaledVector(isoDir, fitDist);
+
+      if (instant) {
+        camera.position.copy(desiredPos);
+        controls.target.copy(center);
+        cameraTransitionActive = false;
+        controls.update();
+      } else {
+        targetCamLook.copy(center);
+        targetCamPos.copy(desiredPos);
+        cameraTransitionActive = true;
+      }
+    }
+
     // Build CAD geometry & pre-warm shaders
     function rebuildModel() {
       cadModelHolder.clear();
@@ -670,6 +719,13 @@ export const CADViewport: React.FC<CADViewportProps> = ({
       rebuildBoundingOverlay(built.group);
       rebuildCenterOfMassGizmo(currentComRef.current);
       rebuildMeasurementLines();
+
+      if (projectRef.current.id !== lastFramedProjectId) {
+        const isFirstLoad = lastFramedProjectId === '';
+        lastFramedProjectId = projectRef.current.id;
+        frameCameraToModel(built.group, isFirstLoad);
+      }
+
       onMetricsComputedRef.current(built.dimensions, built.exportPositions);
       requestRender();
     }
@@ -902,11 +958,19 @@ export const CADViewport: React.FC<CADViewportProps> = ({
         requestRender();
       },
       flyToPreset: (preset: CameraPreset) => {
-        targetCamLook.set(0, 17, 0);
-        if (preset === 'front') targetCamPos.set(0, 22, 135);
-        else if (preset === 'top') targetCamPos.set(0, 155, 0.1);
-        else if (preset === 'right') targetCamPos.set(135, 22, 0);
-        else targetCamPos.set(92, 68, 102);
+        const fovRad = THREE.MathUtils.degToRad(camera.fov);
+        const fitDist = Math.max(24, (activeModelRadius / Math.sin(fovRad / 2)) * 1.38);
+        targetCamLook.copy(activeModelCenter);
+        if (preset === 'front') {
+          targetCamPos.set(activeModelCenter.x, activeModelCenter.y + activeModelRadius * 0.12, activeModelCenter.z + fitDist);
+        } else if (preset === 'top') {
+          targetCamPos.set(activeModelCenter.x, activeModelCenter.y + fitDist * 1.15, activeModelCenter.z + 0.1);
+        } else if (preset === 'right') {
+          targetCamPos.set(activeModelCenter.x + fitDist, activeModelCenter.y + activeModelRadius * 0.12, activeModelCenter.z);
+        } else {
+          const isoDir = new THREE.Vector3(0.60, 0.44, 0.66).normalize();
+          targetCamPos.copy(activeModelCenter).addScaledVector(isoDir, fitDist);
+        }
         cameraTransitionActive = true;
         requestRender();
       },

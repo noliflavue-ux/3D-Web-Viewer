@@ -74,6 +74,7 @@ export interface BoundingDimensions {
   surfaceAreaCm2: number;
   triangleCount: number;
   physical?: PhysicalProperties;
+  scadWarnings?: string[];
 }
 
 export interface SpatialComment {

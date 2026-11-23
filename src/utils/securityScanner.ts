@@ -89,8 +89,8 @@ export function validateCADUpload(
     }
   }
 
-  // Decode first 8KB as text for text-based inspection
-  const sampleLength = Math.min(bytes.length, 8192);
+  // Decode first 64KB as text for text-based inspection
+  const sampleLength = Math.min(bytes.length, 65536);
   let sampleText = textPreview ?? '';
   if (!sampleText && sampleLength > 0) {
     try {
@@ -127,17 +127,18 @@ export function validateCADUpload(
     const upper = sampleText.toUpperCase();
     magicBytesValid = upper.includes('ISO-10303-21') || upper.includes('HEADER;') || upper.includes('DATA;');
   } else if (detectedFormat === 'scad') {
-    // OpenSCAD must contain geometric primitives or module declarations and no null bytes
+    // OpenSCAD must be valid UTF-8 text without null bytes and contain OpenSCAD syntax/primitives
     let hasNullBytes = false;
-    for (let i = 0; i < Math.min(bytes.length, 1024); i++) {
+    for (let i = 0; i < Math.min(bytes.length, 2048); i++) {
       if (bytes[i] === 0) {
         hasNullBytes = true;
         break;
       }
     }
-    const hasScadKeywords = /\b(cube|cylinder|sphere|union|difference|intersection|translate|rotate|scale|module|linear_extrude|polyhedron)\b/i.test(
-      sampleText
-    );
+    const hasScadKeywords =
+      /(?:\b(cube|cylinder|sphere|polyhedron|square|circle|polygon|union|difference|intersection|hull|minkowski|translate|rotate|scale|mirror|multmatrix|color|resize|offset|linear_extrude|rotate_extrude|projection|surface|text|module|function|for|if|let|include|use|import|echo)\b|\$(fn|fa|fs|t|vpr|vpt|vpd)\b)/i.test(
+        sampleText
+      );
     magicBytesValid = !hasNullBytes && hasScadKeywords;
   }
 

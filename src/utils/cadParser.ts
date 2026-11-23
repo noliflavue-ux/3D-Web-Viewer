@@ -198,9 +198,9 @@ export function parseScadCode(
 
   const primitives: ParsedScadPrimitive[] = [];
 
-  // Check if preset architectural template keywords exist in code
-  const lower = scadCode.toLowerCase();
-  if (lower.includes('module aero_turbine_impeller') || lower.includes('blade_count')) {
+  // Only match the 3 exact built-in demo studio templates via explicit module declaration
+  // (Never hijack user files based on generic variable names like flange_width, blade_count, teeth_count!)
+  if (/\bmodule\s+aero_turbine_impeller\b/i.test(scadCode)) {
     const outerRadius = extractedParameters.outer_radius ?? 42;
     const hubHeight = extractedParameters.hub_height ?? 28;
     const bladeCount = Math.max(3, Math.min(24, Math.round(extractedParameters.blade_count ?? 9)));
@@ -215,7 +215,7 @@ export function parseScadCode(
       partGroup: 0,
       roughnessOffset: 0,
     });
-  } else if (lower.includes('module precision_servo_bracket') || lower.includes('flange_width')) {
+  } else if (/\bmodule\s+precision_servo_bracket\b/i.test(scadCode)) {
     const width = extractedParameters.flange_width ?? 68;
     const height = extractedParameters.bracket_height ?? 44;
     const thickness = extractedParameters.wall_thickness ?? 8;
@@ -230,7 +230,7 @@ export function parseScadCode(
       partGroup: 0,
       roughnessOffset: 0,
     });
-  } else if (lower.includes('module planetary_helical_gear') || lower.includes('teeth_count')) {
+  } else if (/\bmodule\s+planetary_helical_gear\b/i.test(scadCode)) {
     const pitchRadius = extractedParameters.pitch_radius ?? 38;
     const gearThickness = extractedParameters.gear_thickness ?? 18;
     const teethCount = Math.max(6, Math.min(48, Math.round(extractedParameters.teeth_count ?? 18)));
@@ -352,19 +352,6 @@ export function parseScadCode(
         inDifferenceBlock = false;
       }
     }
-  }
-
-  // Fallback default if user deleted everything
-  if (primitives.length === 0) {
-    primitives.push({
-      type: 'bracket_assembly',
-      operation: 'add',
-      size: [60, 40, 8],
-      position: [12, 0, 0],
-      rotation: [0, 0, 0],
-      partGroup: 0,
-      roughnessOffset: 0,
-    });
   }
 
   return {
@@ -741,6 +728,10 @@ export function analyzeScadCodeStructure(scadCode: string): ScadAnalysisResult {
   let cubeCount = 0;
   let cylinderCount = 0;
   let sphereCount = 0;
+  let polyhedronCount = 0;
+  let extrudeCount = 0;
+  let shape2DCount = 0;
+  let hullCount = 0;
   let hasDifference = false;
   let hasUnion = false;
   let explicitNameMatch = '';
@@ -766,30 +757,40 @@ export function analyzeScadCodeStructure(scadCode: string): ScadAnalysisResult {
       moduleNames.push(modMatch[1]);
     }
 
-    if (/\bdifference\s*\(/.test(trimmed)) hasDifference = true;
-    if (/\bunion\s*\(/.test(trimmed)) hasUnion = true;
-    if (/\bcube\s*\(/.test(trimmed)) cubeCount++;
-    if (/\bcylinder\s*\(/.test(trimmed)) cylinderCount++;
-    if (/\bsphere\s*\(/.test(trimmed)) sphereCount++;
+    const codeOnly = trimmed.replace(/\/\/.*$/, '');
+    if (!codeOnly) continue;
+
+    if (/\bdifference\s*\(/.test(codeOnly)) hasDifference = true;
+    if (/\bunion\s*\(/.test(codeOnly)) hasUnion = true;
+    cubeCount += (codeOnly.match(/\bcube\s*\(/g) || []).length;
+    cylinderCount += (codeOnly.match(/\bcylinder\s*\(/g) || []).length;
+    sphereCount += (codeOnly.match(/\bsphere\s*\(/g) || []).length;
+    polyhedronCount += (codeOnly.match(/\bpolyhedron\s*\(/g) || []).length;
+    extrudeCount += (codeOnly.match(/\b(?:linear_extrude|rotate_extrude)\s*\(/g) || []).length;
+    shape2DCount += (codeOnly.match(/\b(?:square|circle|polygon)\s*\(/g) || []).length;
+    hullCount += (codeOnly.match(/\b(?:hull|minkowski)\s*\(/g) || []).length;
   }
 
-  // Check known complex architectural modules
-  const lower = scadCode.toLowerCase();
-  if (lower.includes('module aero_turbine_impeller') || lower.includes('blade_count')) {
+  // Only recognize explicit built-in demo studio module declarations
+  if (/\bmodule\s+aero_turbine_impeller\b/i.test(scadCode)) {
     detectedPrimitivesSummary.push('Aero-Impeller Schaufelkranz (Parametrisch)');
-  } else if (lower.includes('module planetary_helical_gear') || lower.includes('teeth_count')) {
+  } else if (/\bmodule\s+planetary_helical_gear\b/i.test(scadCode)) {
     detectedPrimitivesSummary.push('Stirnzahnrad mit Evolventenflanke');
-  } else if (lower.includes('module precision_servo_bracket') || lower.includes('flange_width')) {
+  } else if (/\bmodule\s+precision_servo_bracket\b/i.test(scadCode)) {
     detectedPrimitivesSummary.push('CNC Halterung & Flansch');
   }
 
   if (cubeCount > 0) detectedPrimitivesSummary.push(`${cubeCount}x Quader (cube)`);
   if (cylinderCount > 0) detectedPrimitivesSummary.push(`${cylinderCount}x Zylinder / Bohrung (cylinder)`);
   if (sphereCount > 0) detectedPrimitivesSummary.push(`${sphereCount}x Kugel (sphere)`);
+  if (polyhedronCount > 0) detectedPrimitivesSummary.push(`${polyhedronCount}x Polyeder (polyhedron)`);
+  if (extrudeCount > 0) detectedPrimitivesSummary.push(`${extrudeCount}x Extrusion (2D→3D)`);
+  if (shape2DCount > 0) detectedPrimitivesSummary.push(`${shape2DCount}x 2D-Profil (square/circle/polygon)`);
+  if (hullCount > 0) detectedPrimitivesSummary.push(`${hullCount}x Hüllkörper (hull/minkowski)`);
 
   const primitiveCount = Math.max(
     detectedPrimitivesSummary.length,
-    cubeCount + cylinderCount + sphereCount
+    cubeCount + cylinderCount + sphereCount + polyhedronCount + extrudeCount + shape2DCount
   );
 
   let suggestedName = explicitNameMatch;

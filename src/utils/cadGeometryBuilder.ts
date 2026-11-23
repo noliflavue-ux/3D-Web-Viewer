@@ -3,6 +3,7 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { MaterialFinish, CADModelProject, BoundingDimensions } from '../types/cad';
 import { parseScadCode, parseStepFileMetrics, calculateSeparationVector } from './cadParser';
 import { computeMeshPhysicalProperties } from './physicalProperties';
+import { evaluateOpenScadToGeometries } from './scadEngine';
 
 /**
  * Creates a calibrated PBR material set with varied roughness/metalness across sub-parts
@@ -83,6 +84,7 @@ export function buildCADAssemblyGroup(
 } {
   const rootGroup = new THREE.Group();
   rootGroup.name = 'CAD_Root_Assembly';
+  let scadWarnings: string[] = [];
 
   // 1. If project has raw uploaded STL binary/ASCII base64 data, parse with STLLoader
   if (project.format === 'stl' && project.stlBufferBase64) {
@@ -153,8 +155,77 @@ export function buildCADAssemblyGroup(
     rootGroup.add(collarRing);
   }
 
-  // 3. Parametric SCAD / Composite Multi-Part Assembly Builder
-  if (rootGroup.children.length === 0) {
+  // 3. OpenSCAD Evaluation:
+  //    - The 3 built-in studio showcase modules (aero_turbine_impeller, precision_servo_bracket,
+  //      planetary_helical_gear) use their high-detail multi-part procedural studio meshes.
+  //    - ALL user-uploaded, pasted, or custom OpenSCAD code runs through the real OpenSCAD
+  //      AST + 2D/3D CSG geometry engine (evaluateOpenScadToGeometries).
+  const isBuiltinStudioPreset =
+    /\bmodule\s+(aero_turbine_impeller|precision_servo_bracket|planetary_helical_gear)\b/i.test(
+      project.scadCode || ''
+    );
+
+  if (rootGroup.children.length === 0 && !isBuiltinStudioPreset && project.scadCode?.trim()) {
+    const evalResult = evaluateOpenScadToGeometries(project.scadCode, project.parameters);
+    scadWarnings = evalResult.warnings;
+
+    if (evalResult.parts.length > 0) {
+      // Convert every part from OpenSCAD right-handed Z-up (+X right, +Y back, +Z up)
+      // to Three.js right-handed Y-up (+X right, +Y up, +Z front) via rotateX(-PI/2).
+      const combinedBox = new THREE.Box3();
+      const convertedParts = evalResult.parts.map((part) => {
+        const geom = part.geometry.clone();
+        geom.rotateX(-Math.PI / 2);
+        geom.computeBoundingBox();
+        if (geom.boundingBox && !geom.boundingBox.isEmpty()) {
+          combinedBox.union(geom.boundingBox);
+        }
+        return { ...part, geometry: geom };
+      });
+
+      const globalCenter = new THREE.Vector3();
+      if (!combinedBox.isEmpty()) {
+        combinedBox.getCenter(globalCenter);
+      }
+      const offsetX = -globalCenter.x;
+      const offsetY = !combinedBox.isEmpty() ? -combinedBox.min.y : 0;
+      const offsetZ = -globalCenter.z;
+
+      convertedParts.forEach((part, idx) => {
+        part.geometry.translate(offsetX, offsetY, offsetZ);
+        part.geometry.computeVertexNormals();
+        part.geometry.computeBoundingBox();
+        part.geometry.computeBoundingSphere();
+
+        const baseMat = createPartMaterial(project.finish, idx, isSoftwareGl, wireframe);
+        if (part.colorHex !== undefined) {
+          baseMat.color.setHex(part.colorHex);
+        }
+        if (part.opacity !== undefined && part.opacity < 0.99) {
+          baseMat.transparent = true;
+          baseMat.opacity = Math.max(0.12, part.opacity);
+          baseMat.depthWrite = part.opacity > 0.6;
+        }
+
+        const mesh = new THREE.Mesh(part.geometry, baseMat);
+        mesh.castShadow = !isSoftwareGl;
+        mesh.receiveShadow = !isSoftwareGl;
+        mesh.userData = {
+          partGroup: idx,
+          partName: part.partName || `Komponente #${idx + 1}`,
+          basePos: new THREE.Vector3(0, 0, 0),
+        };
+        rootGroup.add(mesh);
+      });
+    } else if (scadWarnings.length === 0) {
+      scadWarnings.push(
+        'Keine 3D-Geometrie im OpenSCAD-Quelltext gefunden (z. B. nur Modul-Definition ohne Aufruf).'
+      );
+    }
+  }
+
+  // 4. Built-in Studio Parametric Showcase Assemblies (only for the 3 explicit studio modules)
+  if (rootGroup.children.length === 0 && isBuiltinStudioPreset) {
     const parsed = parseScadCode(project.scadCode, project.parameters);
 
     for (const prim of parsed.primitives) {
@@ -520,9 +591,10 @@ export function buildCADAssemblyGroup(
     };
   });
 
-  const width = Number(Math.max(1, size.x).toFixed(1));
-  const height = Number(Math.max(1, size.y).toFixed(1));
-  const depth = Number(Math.max(1, size.z).toFixed(1));
+  const hasGeometry = !box.isEmpty() && triangleCount > 0;
+  const width = hasGeometry ? Number(Math.max(0.1, size.x).toFixed(1)) : 0;
+  const height = hasGeometry ? Number(Math.max(0.1, size.y).toFixed(1)) : 0;
+  const depth = hasGeometry ? Number(Math.max(0.1, size.z).toFixed(1)) : 0;
 
   // Compute exact mesh-integrated physical properties (volume, surface area, mass, CoM, inertia tensor)
   const solidPositions = new Float32Array(solidVertexChunks.length > 0 ? solidVertexChunks : vertexChunks);
@@ -538,6 +610,7 @@ export function buildCADAssemblyGroup(
       surfaceAreaCm2: physical.surfaceAreaCm2,
       triangleCount: Math.round(triangleCount),
       physical,
+      scadWarnings: scadWarnings.length > 0 ? scadWarnings : undefined,
     },
     exportPositions: new Float32Array(vertexChunks),
   };

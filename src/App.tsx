@@ -656,14 +656,20 @@ export default function App() {
 
     const scanReport = validateCADUpload(file.name, bytes, textPreview);
     setLatestSecurityReport(scanReport);
-    setActiveDrawerTab('security');
 
     if (!scanReport.passed || scanReport.detectedFormat === 'unknown') {
+      setActiveDrawerTab('security');
       soundEngine.playSecurityAlert();
       showTransientBanner('error', scanReport.threatSummary);
       e.target.value = '';
       return;
     }
+
+    // Close drawers/modals so the newly uploaded 3D model is immediately visible unobstructed
+    setActiveDrawerTab('none');
+    setIsModelsOverviewOpen(false);
+    setIsScadEditorOpen(false);
+    setSelectedCommentId(null);
 
     soundEngine.playSuccessChime();
     const fmt = scanReport.detectedFormat;
@@ -1111,6 +1117,16 @@ export default function App() {
                     {formatUnitDims(computedDimensions)}
                   </span>
                 </button>
+
+                {computedDimensions.scadWarnings && computedDimensions.scadWarnings.length > 0 && (
+                  <div
+                    data-testid="scad-warnings-notice"
+                    className="mt-2 px-2.5 py-1.5 rounded-xl bg-amber-50/95 border border-amber-300/70 text-[11px] text-amber-900 leading-snug"
+                  >
+                    <span className="font-bold">OpenSCAD Hinweis:</span>{' '}
+                    {computedDimensions.scadWarnings[0]}
+                  </div>
+                )}
               </div>
 
               <button
