@@ -76,7 +76,8 @@ export function createPartMaterial(
 export function buildCADAssemblyGroup(
   project: CADModelProject,
   isSoftwareGl: boolean,
-  wireframe: boolean
+  wireframe: boolean,
+  extraScadLibraries: Record<string, string> = {}
 ): {
   group: THREE.Group;
   dimensions: BoundingDimensions;
@@ -85,6 +86,8 @@ export function buildCADAssemblyGroup(
   const rootGroup = new THREE.Group();
   rootGroup.name = 'CAD_Root_Assembly';
   let scadWarnings: string[] = [];
+  let missingScadIncludes: string[] = [];
+  let resolvedScadIncludes: string[] = [];
 
   // 1. If project has raw uploaded STL binary/ASCII base64 data, parse with STLLoader
   if (project.format === 'stl' && project.stlBufferBase64) {
@@ -166,8 +169,18 @@ export function buildCADAssemblyGroup(
     );
 
   if (rootGroup.children.length === 0 && !isBuiltinStudioPreset && project.scadCode?.trim()) {
-    const evalResult = evaluateOpenScadToGeometries(project.scadCode, project.parameters);
+    const mergedLibraries: Record<string, string> = {
+      ...extraScadLibraries,
+      ...(project.scadLibraries || {}),
+    };
+    const evalResult = evaluateOpenScadToGeometries(
+      project.scadCode,
+      project.parameters,
+      mergedLibraries
+    );
     scadWarnings = evalResult.warnings;
+    missingScadIncludes = evalResult.missingIncludes;
+    resolvedScadIncludes = evalResult.resolvedIncludes;
 
     if (evalResult.parts.length > 0) {
       // Convert every part from OpenSCAD right-handed Z-up (+X right, +Y back, +Z up)
@@ -611,6 +624,8 @@ export function buildCADAssemblyGroup(
       triangleCount: Math.round(triangleCount),
       physical,
       scadWarnings: scadWarnings.length > 0 ? scadWarnings : undefined,
+      missingScadIncludes: missingScadIncludes.length > 0 ? missingScadIncludes : undefined,
+      resolvedScadIncludes: resolvedScadIncludes.length > 0 ? resolvedScadIncludes : undefined,
     },
     exportPositions: new Float32Array(vertexChunks),
   };

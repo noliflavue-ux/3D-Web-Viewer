@@ -35,6 +35,11 @@ import {
   updateScadParameterInCode,
 } from './utils/cadParser';
 import { sanitizeUserText, validateCADUpload } from './utils/securityScanner';
+import {
+  evaluateOpenScadToGeometries,
+  extractScadIncludePaths,
+  resolveScadLibrarySource,
+} from './utils/scadEngine';
 import { soundEngine } from './utils/soundEngine';
 import { MATERIAL_SPECS, formatMassDisplay } from './utils/physicalProperties';
 import { CADViewport } from './components/CADViewport';
@@ -70,6 +75,7 @@ const STORAGE_KEY_PROJECTS = 'aethercad_projects_v3';
 const STORAGE_KEY_FOLDERS = 'aethercad_folders_v1';
 const STORAGE_KEY_SESSION = 'aethercad_user_session_v1';
 const STORAGE_KEY_SETTINGS = 'aethercad_workspace_settings_v1';
+const STORAGE_KEY_SCAD_LIBS = 'aethercad_scad_libraries_v1';
 
 const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   unitSystem: 'mm',
@@ -138,6 +144,22 @@ export default function App() {
   });
 
   const [activeProjectId, setActiveProjectId] = useState<string>(INITIAL_CAD_PROJECTS[0].id);
+
+  // Shared workspace OpenSCAD library registry (e.g. config.scad, helpers.scad) for multi-file include/use resolution
+  const [scadLibraryPool, setScadLibraryPool] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_SCAD_LIBS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, string>;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return {};
+  });
 
   // Check URL query parameters for ?share=token&exp=timestamp
   const [publicShareMode, setPublicShareMode] = useState<boolean>(() => {
@@ -225,6 +247,7 @@ export default function App() {
 
   const latestExportPositionsRef = useRef<Float32Array>(new Float32Array(0));
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const scadLibraryInputRef = useRef<HTMLInputElement | null>(null);
 
   const showTransientBanner = (type: 'success' | 'error', text: string) => {
     setStatusBanner({ type, text });
@@ -286,6 +309,14 @@ export default function App() {
       // ignore quota limits
     }
   }, [projects]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_SCAD_LIBS, JSON.stringify(scadLibraryPool));
+    } catch {
+      // ignore quota limits
+    }
+  }, [scadLibraryPool]);
 
   useEffect(() => {
     try {
@@ -643,26 +674,119 @@ export default function App() {
     );
   };
 
-  // Multi-Format CAD Upload with Zero-Trust Security Scanner
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Combined OpenSCAD library map: workspace pool + all uploaded .scad projects + active project's attached libs
+  const mergedScadLibraries = React.useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = { ...scadLibraryPool };
+    for (const p of projects) {
+      if (p.format === 'scad' && p.scadCode?.trim()) {
+        const cleanName = p.name.trim();
+        if (cleanName) {
+          map[cleanName] = p.scadCode;
+          if (!cleanName.toLowerCase().endsWith('.scad')) {
+            map[`${cleanName}.scad`] = p.scadCode;
+          }
+        }
+      }
+      if (p.scadLibraries) {
+        for (const [k, v] of Object.entries(p.scadLibraries)) {
+          map[k] = v;
+        }
+      }
+    }
+    if (activeProject.scadLibraries) {
+      Object.assign(map, activeProject.scadLibraries);
+    }
+    return map;
+  }, [scadLibraryPool, projects, activeProject.scadLibraries]);
 
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    const textPreview = new TextDecoder('utf-8', { fatal: false }).decode(
-      bytes.subarray(0, Math.min(bytes.length, 32768))
+  // Attach one or more OpenSCAD library/config files (e.g. config.scad) directly to the active model & workspace pool
+  const handleAttachScadLibraries = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+
+    const addedLibs: Record<string, string> = {};
+    for (const file of files) {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const textPreview = new TextDecoder('utf-8', { fatal: false }).decode(
+        bytes.subarray(0, Math.min(bytes.length, 65536))
+      );
+      const scanReport = validateCADUpload(file.name, bytes, textPreview);
+      setLatestSecurityReport(scanReport);
+
+      if (!scanReport.passed || scanReport.detectedFormat !== 'scad') {
+        setActiveDrawerTab('security');
+        soundEngine.playSecurityAlert();
+        showTransientBanner('error', scanReport.threatSummary);
+        e.target.value = '';
+        return;
+      }
+
+      const fullText = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      addedLibs[file.name] = fullText;
+    }
+
+    const nextPool = { ...scadLibraryPool, ...addedLibs };
+    const nextProjectLibs = { ...(activeProject.scadLibraries || {}), ...addedLibs };
+    setScadLibraryPool(nextPool);
+
+    // Re-evaluate parameters with the newly attached libraries so sliders immediately reflect config.scad values
+    const combinedEvalLibs = { ...mergedScadLibraries, ...addedLibs };
+    const evalPreview = evaluateOpenScadToGeometries(activeProject.scadCode, {}, combinedEvalLibs);
+
+    updateActiveProject((proj) => ({
+      ...proj,
+      updatedAt: 'Gerade eben',
+      scadLibraries: nextProjectLibs,
+      parameters:
+        Object.keys(evalPreview.extractedParameters).length > 0
+          ? evalPreview.extractedParameters
+          : proj.parameters,
+    }));
+
+    setActiveDrawerTab('none');
+    soundEngine.playSuccessChime();
+    const names = Object.keys(addedLibs).join(', ');
+    showTransientBanner(
+      'success',
+      `OpenSCAD-Bibliothek „${names}“ verknüpft — „${activeProject.name}“ wurde neu berechnet.`
     );
+    e.target.value = '';
+  };
 
-    const scanReport = validateCADUpload(file.name, bytes, textPreview);
-    setLatestSecurityReport(scanReport);
+  // Multi-Format CAD Upload (supports single file OR selecting main .scad + config.scad together!)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
 
-    if (!scanReport.passed || scanReport.detectedFormat === 'unknown') {
-      setActiveDrawerTab('security');
-      soundEngine.playSecurityAlert();
-      showTransientBanner('error', scanReport.threatSummary);
-      e.target.value = '';
-      return;
+    const decodedFiles: {
+      file: File;
+      bytes: Uint8Array;
+      fullText: string;
+      scanReport: SecurityScanReport;
+    }[] = [];
+
+    for (const file of files) {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const textPreview = new TextDecoder('utf-8', { fatal: false }).decode(
+        bytes.subarray(0, Math.min(bytes.length, 65536))
+      );
+      const scanReport = validateCADUpload(file.name, bytes, textPreview);
+      setLatestSecurityReport(scanReport);
+
+      if (!scanReport.passed || scanReport.detectedFormat === 'unknown') {
+        setActiveDrawerTab('security');
+        soundEngine.playSecurityAlert();
+        showTransientBanner('error', scanReport.threatSummary);
+        e.target.value = '';
+        return;
+      }
+
+      const fullText = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      decodedFiles.push({ file, bytes, fullText, scanReport });
     }
 
     // Close drawers/modals so the newly uploaded 3D model is immediately visible unobstructed
@@ -671,70 +795,193 @@ export default function App() {
     setIsScadEditorOpen(false);
     setSelectedCommentId(null);
 
-    soundEngine.playSuccessChime();
-    const fmt = scanReport.detectedFormat;
-    const fullText = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    // Smart Auto-Attach: If user uploaded a single .scad file via regular "Import" that matches a missing
+    // include/use of the currently active model (e.g. uploading config.scad right after 02_lochschablone.scad),
+    // automatically attach it to the active project so the 3D model renders immediately!
+    if (
+      decodedFiles.length === 1 &&
+      decodedFiles[0].scanReport.detectedFormat === 'scad' &&
+      activeProject.format === 'scad' &&
+      (computedDimensions.missingScadIncludes?.length ?? 0) > 0
+    ) {
+      const uploaded = decodedFiles[0];
+      const tempLibMap = { [uploaded.file.name]: uploaded.fullText };
+      const matchesMissing = computedDimensions.missingScadIncludes?.some(
+        (missingPath) => resolveScadLibrarySource(missingPath, tempLibMap) !== null
+      );
+      if (matchesMissing) {
+        const nextPool = { ...scadLibraryPool, [uploaded.file.name]: uploaded.fullText };
+        const nextProjectLibs = {
+          ...(activeProject.scadLibraries || {}),
+          [uploaded.file.name]: uploaded.fullText,
+        };
+        setScadLibraryPool(nextPool);
 
-    let stlBase64: string | undefined;
-    if (fmt === 'stl') {
-      let binary = '';
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
+        const combinedEvalLibs = { ...mergedScadLibraries, [uploaded.file.name]: uploaded.fullText };
+        const evalPreview = evaluateOpenScadToGeometries(activeProject.scadCode, {}, combinedEvalLibs);
+
+        updateActiveProject((proj) => ({
+          ...proj,
+          updatedAt: 'Gerade eben',
+          scadLibraries: nextProjectLibs,
+          parameters:
+            Object.keys(evalPreview.extractedParameters).length > 0
+              ? evalPreview.extractedParameters
+              : proj.parameters,
+        }));
+
+        soundEngine.playSuccessChime();
+        showTransientBanner(
+          'success',
+          `„${uploaded.file.name}“ automatisch als Bibliothek für „${activeProject.name}“ verknüpft.`
+        );
+        e.target.value = '';
+        return;
       }
-      stlBase64 = btoa(binary);
     }
 
-    const extractedParams =
-      fmt === 'scad' ? extractScadParameters(fullText) : { scale_factor: 100 };
+    soundEngine.playSuccessChime();
+
+    // Register ALL uploaded .scad files in the workspace library pool so multi-file includes resolve seamlessly
+    const uploadedScadMap: Record<string, string> = {};
+    for (const item of decodedFiles) {
+      if (item.scanReport.detectedFormat === 'scad') {
+        uploadedScadMap[item.file.name] = item.fullText;
+      }
+    }
+    if (Object.keys(uploadedScadMap).length > 0) {
+      setScadLibraryPool((prev) => ({ ...prev, ...uploadedScadMap }));
+    }
+
+    // If multiple .scad files were uploaded together (e.g. 02_lochschablone.scad + config.scad),
+    // detect which files are referenced as includes by other uploaded files so we open the main model!
+    const referencedLibKeys = new Set<string>();
+    for (const item of decodedFiles) {
+      if (item.scanReport.detectedFormat !== 'scad') continue;
+      const incPaths = extractScadIncludePaths(item.fullText);
+      for (const incPath of incPaths) {
+        const match = resolveScadLibrarySource(incPath, uploadedScadMap);
+        if (match && match.key !== item.file.name) {
+          referencedLibKeys.add(match.key);
+        }
+      }
+    }
+
+    const primaryFiles =
+      decodedFiles.length > 1
+        ? decodedFiles.filter((d) => !referencedLibKeys.has(d.file.name))
+        : decodedFiles;
+    const filesToCreateProjectsFor = primaryFiles.length > 0 ? primaryFiles : [decodedFiles[0]];
+
+    const combinedLibsForImport: Record<string, string> = {
+      ...mergedScadLibraries,
+      ...uploadedScadMap,
+    };
 
     const targetFolderId =
       selectedFolderId !== 'all' ? selectedFolderId : 'folder-prototypes';
 
-    const newProj: CADModelProject = {
-      id: `proj-${Date.now()}`,
-      folderId: targetFolderId,
-      name: sanitizeUserText(file.name.replace(/\.[^.]+$/, ''), 60),
-      category: `Upload · ${fmt.toUpperCase()} Verifiziert`,
-      format: fmt,
-      updatedAt: 'Gerade eben',
-      author: userSession?.name || 'CAD Ingenieur',
-      shareToken: `share-${Date.now().toString(36)}`,
-      isPublicShareEnabled: true,
-      shareConfig: {
-        durationPreset: workspaceSettings.defaultShareDuration,
-        expiresAtMs: computeShareExpiryTimestamp(workspaceSettings.defaultShareDuration),
-        allowGuestComments: true,
-        allowGuestMeasurements: true,
-        allowGuestDownload: false,
-      },
-      currentVersion: 1,
-      scadCode:
-        fmt === 'scad'
-          ? fullText
-          : `// Automatisch generierter Parametrik-Wrapper für ${file.name}\ncube([40, 40, 20]);`,
-      stlBufferBase64: stlBase64,
-      stepSourceText: fmt === 'step' ? fullText : undefined,
-      parameters: Object.keys(extractedParams).length > 0 ? extractedParams : { wall_mm: 10 },
-      finish: workspaceSettings.defaultMaterialFinish,
-      explodedFactor: 0,
-      versions: [
-        {
-          versionNumber: 1,
-          createdAt: 'Gerade eben',
-          author: userSession?.name || 'CAD Ingenieur',
-          changelog: `Sicherheitsgeprüfter ${fmt.toUpperCase()} Original-Import (${file.size} Bytes)`,
-          parameters: Object.keys(extractedParams).length > 0 ? extractedParams : { wall_mm: 10 },
-          finish: workspaceSettings.defaultMaterialFinish,
-        },
-      ],
-      comments: [],
-      measurements: [],
-      lastSecurityReport: scanReport,
-    };
+    const createdProjects: CADModelProject[] = [];
+    for (let idx = 0; idx < filesToCreateProjectsFor.length; idx++) {
+      const { file, bytes, fullText, scanReport } = filesToCreateProjectsFor[idx];
+      const fmt = scanReport.detectedFormat as 'scad' | 'stl' | 'step';
 
-    setProjects((prev) => [newProj, ...prev]);
-    setActiveProjectId(newProj.id);
-    showTransientBanner('success', `${file.name} erfolgreich verifiziert und in 3D geladen.`);
+      let stlBase64: string | undefined;
+      if (fmt === 'stl') {
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        stlBase64 = btoa(binary);
+      }
+
+      // Extract parameters (including parameters resolved from included libraries like config.scad!)
+      let extractedParams: Record<string, number> = { scale_factor: 100 };
+      const attachedLibsForProject: Record<string, string> = {};
+      if (fmt === 'scad') {
+        const directIncludes = extractScadIncludePaths(fullText);
+        for (const incPath of directIncludes) {
+          const resolved = resolveScadLibrarySource(incPath, combinedLibsForImport);
+          if (resolved) {
+            attachedLibsForProject[resolved.key] = resolved.source;
+          }
+        }
+        // Also bundle any companion .scad files uploaded in the same batch (supports nested includes)
+        for (const [k, v] of Object.entries(uploadedScadMap)) {
+          if (k !== file.name) {
+            attachedLibsForProject[k] = v;
+          }
+        }
+        const evalPreview = evaluateOpenScadToGeometries(fullText, {}, combinedLibsForImport);
+        const directParams = extractScadParameters(fullText);
+        extractedParams =
+          Object.keys(evalPreview.extractedParameters).length > 0
+            ? evalPreview.extractedParameters
+            : directParams;
+      }
+
+      const newProj: CADModelProject = {
+        id: `proj-${Date.now()}-${idx}`,
+        folderId: targetFolderId,
+        name: sanitizeUserText(file.name.replace(/\.[^.]+$/, ''), 60),
+        category: `Upload · ${fmt.toUpperCase()} Verifiziert`,
+        format: fmt,
+        updatedAt: 'Gerade eben',
+        author: userSession?.name || 'CAD Ingenieur',
+        shareToken: `share-${Date.now().toString(36)}-${idx}`,
+        isPublicShareEnabled: true,
+        shareConfig: {
+          durationPreset: workspaceSettings.defaultShareDuration,
+          expiresAtMs: computeShareExpiryTimestamp(workspaceSettings.defaultShareDuration),
+          allowGuestComments: true,
+          allowGuestMeasurements: true,
+          allowGuestDownload: false,
+        },
+        currentVersion: 1,
+        scadCode:
+          fmt === 'scad'
+            ? fullText
+            : `// Automatisch generierter Parametrik-Wrapper für ${file.name}\ncube([40, 40, 20]);`,
+        scadLibraries:
+          Object.keys(attachedLibsForProject).length > 0 ? attachedLibsForProject : undefined,
+        stlBufferBase64: stlBase64,
+        stepSourceText: fmt === 'step' ? fullText : undefined,
+        parameters: Object.keys(extractedParams).length > 0 ? extractedParams : { wall_mm: 10 },
+        finish: workspaceSettings.defaultMaterialFinish,
+        explodedFactor: 0,
+        versions: [
+          {
+            versionNumber: 1,
+            createdAt: 'Gerade eben',
+            author: userSession?.name || 'CAD Ingenieur',
+            changelog: `Sicherheitsgeprüfter ${fmt.toUpperCase()} Original-Import (${file.size} Bytes)`,
+            parameters: Object.keys(extractedParams).length > 0 ? extractedParams : { wall_mm: 10 },
+            finish: workspaceSettings.defaultMaterialFinish,
+          },
+        ],
+        comments: [],
+        measurements: [],
+        lastSecurityReport: scanReport,
+      };
+
+      createdProjects.push(newProj);
+    }
+
+    setProjects((prev) => [...createdProjects, ...prev]);
+    setActiveProjectId(createdProjects[0].id);
+
+    if (referencedLibKeys.size > 0) {
+      const libNames = Array.from(referencedLibKeys).join(', ');
+      showTransientBanner(
+        'success',
+        `${createdProjects[0].name} inkl. Bibliothek (${libNames}) erfolgreich in 3D geladen.`
+      );
+    } else {
+      showTransientBanner(
+        'success',
+        `${filesToCreateProjectsFor[0].file.name} erfolgreich verifiziert und in 3D geladen.`
+      );
+    }
     e.target.value = '';
   };
 
@@ -818,14 +1065,27 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-[100dvh] min-h-[100dvh] overflow-hidden bg-slate-100 text-slate-900 flex flex-col">
-      {/* Hidden File Upload Input for .scad, .stl, .step, .stp */}
+      {/* Hidden Multi-File Upload Input for .scad (incl. companion config/lib .scad), .stl, .step, .stp */}
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept=".scad,.stl,.step,.stp"
         onChange={handleFileUpload}
         className="hidden"
-        aria-label="CAD-Datei hochladen (.scad, .stl, .step)"
+        aria-label="CAD-Dateien hochladen (.scad, .stl, .step)"
+      />
+
+      {/* Dedicated Hidden Input for attaching missing OpenSCAD include/use library files (e.g. config.scad) */}
+      <input
+        ref={scadLibraryInputRef}
+        type="file"
+        multiple
+        accept=".scad"
+        data-testid="scad-library-file-input"
+        onChange={handleAttachScadLibraries}
+        className="hidden"
+        aria-label="OpenSCAD-Bibliotheksdatei nachladen (.scad)"
       />
 
       {/* STRICT 3-ZONE APPLE DAYLIGHT GLASS TOP BAR CONTRACT WITH MOBILE MENU SUPPORT */}
@@ -1118,13 +1378,45 @@ export default function App() {
                   </span>
                 </button>
 
+                {computedDimensions.resolvedScadIncludes &&
+                  computedDimensions.resolvedScadIncludes.length > 0 && (
+                    <div
+                      data-testid="scad-resolved-libs-notice"
+                      className="mt-1.5 flex items-center gap-1.5 text-[11px] text-emerald-700 font-medium"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="truncate">
+                        Verknüpft: {computedDimensions.resolvedScadIncludes.join(', ')}
+                      </span>
+                    </div>
+                  )}
+
                 {computedDimensions.scadWarnings && computedDimensions.scadWarnings.length > 0 && (
                   <div
                     data-testid="scad-warnings-notice"
-                    className="mt-2 px-2.5 py-1.5 rounded-xl bg-amber-50/95 border border-amber-300/70 text-[11px] text-amber-900 leading-snug"
+                    className="mt-2 px-2.5 py-2 rounded-xl bg-amber-50/95 border border-amber-300/70 text-[11px] text-amber-900 leading-snug space-y-2"
                   >
-                    <span className="font-bold">OpenSCAD Hinweis:</span>{' '}
-                    {computedDimensions.scadWarnings[0]}
+                    <div>
+                      <span className="font-bold">OpenSCAD Hinweis:</span>{' '}
+                      {computedDimensions.scadWarnings[0]}
+                    </div>
+                    {computedDimensions.missingScadIncludes &&
+                      computedDimensions.missingScadIncludes.length > 0 && (
+                        <button
+                          type="button"
+                          data-testid="attach-missing-scad-lib-btn"
+                          onClick={() => {
+                            soundEngine.playClick();
+                            scadLibraryInputRef.current?.click();
+                          }}
+                          className="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-[11px] shadow-xs transition-colors cursor-pointer"
+                        >
+                          <Upload className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">
+                            „{computedDimensions.missingScadIncludes[0]}“ nachladen
+                          </span>
+                        </button>
+                      )}
                   </div>
                 )}
               </div>
@@ -1344,6 +1636,7 @@ export default function App() {
         {/* Central 100% Unobstructed Interactive Three.js Viewport */}
         <CADViewport
           project={activeProject}
+          scadLibraries={mergedScadLibraries}
           toolMode={toolMode}
           showDimensions={showDimensions}
           showCenterOfMass={showCenterOfMass}
@@ -1490,6 +1783,8 @@ export default function App() {
           onResetWorkspaceData={() => {
             localStorage.removeItem(STORAGE_KEY_PROJECTS);
             localStorage.removeItem(STORAGE_KEY_FOLDERS);
+            localStorage.removeItem(STORAGE_KEY_SCAD_LIBS);
+            setScadLibraryPool({});
             setFolders(INITIAL_CAD_FOLDERS);
             setProjects(INITIAL_CAD_PROJECTS);
             setActiveProjectId(INITIAL_CAD_PROJECTS[0].id);

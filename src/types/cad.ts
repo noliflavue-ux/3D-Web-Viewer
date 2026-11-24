@@ -75,6 +75,8 @@ export interface BoundingDimensions {
   triangleCount: number;
   physical?: PhysicalProperties;
   scadWarnings?: string[];
+  missingScadIncludes?: string[];
+  resolvedScadIncludes?: string[];
 }
 
 export interface SpatialComment {
@@ -164,6 +166,7 @@ export interface CADModelProject {
   shareConfig?: ShareLinkConfig;
   currentVersion: number;
   scadCode: string;
+  scadLibraries?: Record<string, string>;
   stlBufferBase64?: string;
   stepSourceText?: string;
   parameters: Record<string, number>;

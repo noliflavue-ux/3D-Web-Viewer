@@ -21,8 +21,92 @@ export interface ScadBuiltPart {
 export interface ScadEvaluationOutput {
   parts: ScadBuiltPart[];
   warnings: string[];
+  missingIncludes: string[];
+  resolvedIncludes: string[];
   primitiveCount: number;
   extractedParameters: Record<string, number>;
+}
+
+/**
+ * Extracts all `include <...>` and `use <...>` dependency paths referenced in OpenSCAD code.
+ */
+export function extractScadIncludePaths(scadCode: string): string[] {
+  const found: string[] = [];
+  // Strip comments first so commented-out includes aren't treated as required dependencies
+  const stripped = scadCode
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  const regex = /\b(?:include|use)\s*<([^>]+)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(stripped)) !== null) {
+    const p = match[1].trim();
+    if (p && !found.includes(p)) {
+      found.push(p);
+    }
+  }
+  return found;
+}
+
+function normalizeScadPath(rawPath: string): string {
+  return rawPath
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^(\.\.?\/)+/, '')
+    .replace(/^\/+/, '');
+}
+
+function getScadBasename(rawPath: string): string {
+  const norm = normalizeScadPath(rawPath);
+  const parts = norm.split('/');
+  return parts[parts.length - 1] || norm;
+}
+
+/**
+ * Resolves a requested OpenSCAD include/use path (e.g. `config.scad`, `./libs/config.scad`, `../config.scad`)
+ * against a map of uploaded/workspace library files.
+ */
+export function resolveScadLibrarySource(
+  requestedPath: string,
+  libraries: Record<string, string>
+): { key: string; source: string } | null {
+  const entries = Object.entries(libraries);
+  if (entries.length === 0) return null;
+
+  const normReq = normalizeScadPath(requestedPath);
+  const normReqLower = normReq.toLowerCase();
+  const baseReqLower = getScadBasename(requestedPath).toLowerCase();
+  const stemReqLower = baseReqLower.replace(/\.scad$/i, '');
+
+  // 1. Exact normalized path match
+  for (const [k, v] of entries) {
+    if (normalizeScadPath(k) === normReq) return { key: k, source: v };
+  }
+  // 2. Case-insensitive normalized path match
+  for (const [k, v] of entries) {
+    if (normalizeScadPath(k).toLowerCase() === normReqLower) return { key: k, source: v };
+  }
+  // 3. Basename match (handles ./config.scad, ../config.scad, libs/config.scad -> config.scad)
+  for (const [k, v] of entries) {
+    if (getScadBasename(k).toLowerCase() === baseReqLower) return { key: k, source: v };
+  }
+  // 4. Stem match without .scad extension (handles project names stored without extension)
+  for (const [k, v] of entries) {
+    const kStem = getScadBasename(k).toLowerCase().replace(/\.scad$/i, '');
+    if (kStem && kStem === stemReqLower) return { key: k, source: v };
+  }
+
+  return null;
+}
+
+function safeFinite(val: unknown, fallback: number): number {
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function safePositive(val: unknown, fallback: number, minVal = 0.05): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(minVal, Math.abs(n));
 }
 
 type ScadVal = number | boolean | string | undefined | ScadVal[] | { __range: true; start: number; step: number; end: number };
@@ -207,7 +291,7 @@ type StmtNode =
   | { kind: 'for'; bindings: { name: string; expr: ExprNode }[]; body: StmtNode }
   | { kind: 'let'; bindings: { name: string; expr: ExprNode }[]; body: StmtNode }
   | { kind: 'call_stmt'; modifier?: string; name: string; args: { name?: string; expr: ExprNode }[]; child?: StmtNode }
-  | { kind: 'include'; path: string }
+  | { kind: 'include'; path: string; mode: 'include' | 'use' }
   | { kind: 'empty' };
 
 // -----------------------------
@@ -278,11 +362,13 @@ class ScadParser {
       return { kind: 'block', stmts };
     }
 
-    // include / use
+    // include <...> / use <...>
     if (t.type === 'ident' && (t.value === 'include' || t.value === 'use') && this.peek(1).type === 'string') {
+      const mode = t.value as 'include' | 'use';
       this.next();
       const pathTok = this.next();
-      return { kind: 'include', path: pathTok.value };
+      this.match('punct', ';'); // Tolerate optional trailing semicolon
+      return { kind: 'include', path: pathTok.value, mode };
     }
 
     // module name(params) { ... }
@@ -914,8 +1000,14 @@ function convexHull2D(points: THREE.Vector2[]): THREE.Vector2[] {
 // -----------------------------
 interface EvalScope {
   vars: Record<string, ScadVal>;
-  funcs: Record<string, { params: { name: string; defaultExpr?: ExprNode }[]; body: ExprNode }>;
-  mods: Record<string, { params: { name: string; defaultExpr?: ExprNode }[]; body: StmtNode[] }>;
+  funcs: Record<
+    string,
+    { params: { name: string; defaultExpr?: ExprNode }[]; body: ExprNode; defScope?: EvalScope }
+  >;
+  mods: Record<
+    string,
+    { params: { name: string; defaultExpr?: ExprNode }[]; body: StmtNode[]; defScope?: EvalScope }
+  >;
   parent?: EvalScope;
   callerChildren?: StmtNode[];
   callerScope?: EvalScope;
@@ -935,11 +1027,17 @@ interface Raw2DContour {
 
 class ScadEvaluator {
   warnings: string[] = [];
+  missingIncludes: string[] = [];
+  resolvedIncludes: string[] = [];
   primitiveCount = 0;
-  private stepBudget = 12000;
+  private stepBudget = 16000;
   private rootScope: EvalScope;
 
-  constructor(private paramOverrides: Record<string, number>) {
+  constructor(
+    private paramOverrides: Record<string, number>,
+    private scadLibraries: Record<string, string> = {},
+    private rootSource: string = ''
+  ) {
     this.rootScope = {
       vars: {
         PI: Math.PI,
@@ -1187,7 +1285,8 @@ class ScadEvaluator {
     // Check user-defined function first
     const userFn = this.getFunc(scope, name);
     if (userFn) {
-      const fnScope = this.createChildScope(scope);
+      const fnParent = userFn.defScope || scope;
+      const fnScope = this.createChildScope(fnParent);
       userFn.params.forEach((p, idx) => {
         if (p.name in namedVals) fnScope.vars[p.name] = namedVals[p.name];
         else if (idx < posVals.length) fnScope.vars[p.name] = posVals[idx];
@@ -1289,7 +1388,7 @@ class ScadEvaluator {
     if (name === 'translate') {
       const v = args.named.v ?? args.pos[0];
       if (Array.isArray(v)) {
-        mat.makeTranslation(Number(v[0] ?? 0), Number(v[1] ?? 0), Number(v[2] ?? 0));
+        mat.makeTranslation(safeFinite(v[0], 0), safeFinite(v[1], 0), safeFinite(v[2], 0));
       }
     } else if (name === 'rotate') {
       const a = args.named.a ?? args.pos[0];
@@ -1367,22 +1466,115 @@ class ScadEvaluator {
   }
 
   /**
+   * Recursively resolves `include <...>` and `use <...>` directives into the target scope,
+   * returning expanded top-level statements (for `include`) while respecting OpenSCAD semantics:
+   * - `include <file>`: merges variables, functions, modules AND top-level geometry into caller scope.
+   * - `use <file>`: imports only functions and modules (with lexical access to the library's own variables),
+   *   without executing top-level geometry of the used file.
+   */
+  private expandIncludes(
+    stmts: StmtNode[],
+    scope: EvalScope,
+    visited: Set<string>,
+    isUseContext: boolean
+  ): StmtNode[] {
+    const expanded: StmtNode[] = [];
+
+    for (const st of stmts) {
+      if (st.kind !== 'include') {
+        expanded.push(st);
+        continue;
+      }
+
+      const resolved = resolveScadLibrarySource(st.path, this.scadLibraries);
+      if (!resolved) {
+        if (!this.missingIncludes.includes(st.path)) {
+          this.missingIncludes.push(st.path);
+        }
+        this.warnings.push(
+          `Fehlende OpenSCAD-Datei „${st.path}“ — bitte über „Nachladen“ oder gemeinsam per Import hinzufügen.`
+        );
+        continue;
+      }
+
+      const visitKey = `${st.mode}:${normalizeScadPath(resolved.key).toLowerCase()}`;
+      if (visited.has(visitKey)) {
+        continue; // Guard against circular includes
+      }
+      visited.add(visitKey);
+
+      if (!this.resolvedIncludes.includes(st.path)) {
+        this.resolvedIncludes.push(st.path);
+      }
+
+      const libTokens = tokenizeScad(resolved.source);
+      const libAst = new ScadParser(libTokens).parseProgram();
+
+      if (st.mode === 'include' && !isUseContext) {
+        // Inline included AST directly so its vars, modules, functions, and geometry execute in caller scope
+        const nested = this.expandIncludes(libAst, scope, visited, false);
+        for (const nst of nested) {
+          expanded.push(nst);
+        }
+      } else {
+        // `use <lib.scad>`: evaluate library definitions in a dedicated library scope,
+        // then expose its functions & modules into the caller scope bound to libScope.
+        const libScope = this.createChildScope(this.rootScope);
+        const libExpanded = this.expandIncludes(libAst, libScope, visited, true);
+        for (const lst of libExpanded) {
+          if (lst.kind === 'func_def') {
+            const def = { params: lst.params, body: lst.body, defScope: libScope };
+            libScope.funcs[lst.name] = def;
+            scope.funcs[lst.name] = def;
+          } else if (lst.kind === 'mod_def') {
+            const def = { params: lst.params, body: lst.body, defScope: libScope };
+            libScope.mods[lst.name] = def;
+            scope.mods[lst.name] = def;
+          }
+        }
+        for (const lst of libExpanded) {
+          if (lst.kind === 'assign') {
+            libScope.vars[lst.name] = this.evalExpr(lst.expr, libScope);
+          }
+        }
+      }
+    }
+
+    return expanded;
+  }
+
+  /**
    * Evaluates a list of statements in 3D space.
-   * Registers all module/function definitions and assignments in a first pass (matching OpenSCAD hoisting!),
-   * then evaluates geometric statements.
+   * Resolves all `include`/`use` files, registers all module/function definitions and assignments
+   * in a first pass (matching OpenSCAD hoisting!), then evaluates geometric statements.
    */
   public evaluateProgram(stmts: StmtNode[]): ScadEvaluationOutput {
     const scope = this.rootScope;
 
+    // Pass 0: Resolve and inline `include <...>` and register `use <...>` modules/functions
+    // Seed visited set with any library key whose content matches the root file (guards root -> B -> root cycles)
+    const initialVisited = new Set<string>();
+    const trimmedRoot = this.rootSource.trim();
+    if (trimmedRoot) {
+      for (const [k, v] of Object.entries(this.scadLibraries)) {
+        if (v.trim() === trimmedRoot) {
+          const normKey = normalizeScadPath(k).toLowerCase();
+          initialVisited.add(`include:${normKey}`);
+          initialVisited.add(`use:${normKey}`);
+        }
+      }
+    }
+    const expandedStmts = this.expandIncludes(stmts, scope, initialVisited, false);
+
     // Pass 1: Hoist module & function definitions and top-level variable assignments
-    for (const st of stmts) {
+    for (const st of expandedStmts) {
       if (st.kind === 'func_def') {
         scope.funcs[st.name] = { params: st.params, body: st.body };
       } else if (st.kind === 'mod_def') {
         scope.mods[st.name] = { params: st.params, body: st.body };
       }
     }
-    for (const st of stmts) {
+    for (const st of expandedStmts) {
       if (st.kind === 'assign') {
         if (st.name in this.paramOverrides) {
           scope.vars[st.name] = this.paramOverrides[st.name];
@@ -1405,7 +1597,7 @@ class ScadEvaluator {
     }
 
     // Pass 2: Evaluate 3D geometry statements
-    const items = this.evalStmts3D(stmts, scope, 0);
+    const items = this.evalStmts3D(expandedStmts, scope, 0);
 
     const parts: ScadBuiltPart[] = items.map((item, idx) => ({
       geometry: item.geom,
@@ -1417,6 +1609,8 @@ class ScadEvaluator {
     return {
       parts,
       warnings: Array.from(new Set(this.warnings)),
+      missingIncludes: Array.from(new Set(this.missingIncludes)),
+      resolvedIncludes: Array.from(new Set(this.resolvedIncludes)),
       primitiveCount: this.primitiveCount,
       extractedParameters,
     };
@@ -1442,7 +1636,17 @@ class ScadEvaluator {
         continue;
       }
       if (st.kind === 'include') {
-        this.warnings.push(`Externe Bibliothek „${st.path}“ wird im Browser übersprungen.`);
+        const resolved = resolveScadLibrarySource(st.path, this.scadLibraries);
+        if (resolved) {
+          const nested = this.expandIncludes([st], scope, new Set<string>(), st.mode === 'use');
+          const res = this.evalStmts3D(nested, scope, depth + 1);
+          for (const r of res) out.push(r);
+        } else {
+          if (!this.missingIncludes.includes(st.path)) this.missingIncludes.push(st.path);
+          this.warnings.push(
+            `Fehlende OpenSCAD-Datei „${st.path}“ — bitte über „Nachladen“ oder gemeinsam per Import hinzufügen.`
+          );
+        }
         continue;
       }
       const res = this.evalStmt3D(st, scope, depth);
@@ -1522,11 +1726,19 @@ class ScadEvaluator {
           const center = this.isTruthy(args.named.center ?? args.pos[1] ?? false);
           let sx = 1, sy = 1, sz = 1;
           if (Array.isArray(sizeArg)) {
-            sx = Math.max(0.05, Math.abs(Number(sizeArg[0] ?? 1)));
-            sy = Math.max(0.05, Math.abs(Number(sizeArg[1] ?? 1)));
-            sz = Math.max(0.05, Math.abs(Number(sizeArg[2] ?? 1)));
+            if (
+              !Number.isFinite(Number(sizeArg[0])) ||
+              !Number.isFinite(Number(sizeArg[1])) ||
+              !Number.isFinite(Number(sizeArg[2]))
+            ) {
+              return [];
+            }
+            sx = safePositive(sizeArg[0], 1);
+            sy = safePositive(sizeArg[1], 1);
+            sz = safePositive(sizeArg[2], 1);
           } else {
-            const s = Math.max(0.05, Math.abs(Number(sizeArg) || 1));
+            if (!Number.isFinite(Number(sizeArg))) return [];
+            const s = safePositive(sizeArg, 1);
             sx = sy = sz = s;
           }
           const geom = new THREE.BoxGeometry(sx, sy, sz);
@@ -1538,20 +1750,23 @@ class ScadEvaluator {
         }
 
         if (name === 'cylinder') {
-          const h = Math.max(0.05, Math.abs(Number(args.named.h ?? args.pos[0] ?? 1)));
+          const hasH = 'h' in args.named || args.pos.length >= 1;
+          const rawH = 'h' in args.named ? args.named.h : args.pos.length >= 1 ? args.pos[0] : 1;
+          if (hasH && (rawH === undefined || !Number.isFinite(Number(rawH)))) return [];
+          const h = safePositive(rawH, 1);
           let r1: number | undefined;
           let r2: number | undefined;
 
-          if (args.named.r !== undefined) {
+          if ('r' in args.named) {
             r1 = r2 = Number(args.named.r);
-          } else if (args.named.d !== undefined) {
+          } else if ('d' in args.named) {
             r1 = r2 = Number(args.named.d) / 2;
-          } else if (args.named.r1 !== undefined || args.named.r2 !== undefined) {
-            r1 = Number(args.named.r1 ?? 1);
-            r2 = Number(args.named.r2 ?? 1);
-          } else if (args.named.d1 !== undefined || args.named.d2 !== undefined) {
-            r1 = Number(args.named.d1 ?? 2) / 2;
-            r2 = Number(args.named.d2 ?? 2) / 2;
+          } else if ('r1' in args.named || 'r2' in args.named) {
+            r1 = 'r1' in args.named ? Number(args.named.r1) : 1;
+            r2 = 'r2' in args.named ? Number(args.named.r2) : 1;
+          } else if ('d1' in args.named || 'd2' in args.named) {
+            r1 = 'd1' in args.named ? Number(args.named.d1) / 2 : 1;
+            r2 = 'd2' in args.named ? Number(args.named.d2) / 2 : 1;
           } else if (args.pos.length >= 3) {
             r1 = Number(args.pos[1]);
             r2 = Number(args.pos[2]);
@@ -1561,8 +1776,9 @@ class ScadEvaluator {
             r1 = r2 = 1;
           }
 
-          r1 = Math.max(0, Math.abs(r1 ?? 1));
-          r2 = Math.max(0, Math.abs(r2 ?? 1));
+          if (!Number.isFinite(r1) || !Number.isFinite(r2)) return [];
+          r1 = Math.max(0, Math.abs(r1));
+          r2 = Math.max(0, Math.abs(r2));
           if (r1 === 0 && r2 === 0) r1 = r2 = 0.5;
 
           const center = this.isTruthy(args.named.center ?? (args.pos.length >= 4 ? args.pos[3] : false));
@@ -1581,10 +1797,11 @@ class ScadEvaluator {
 
         if (name === 'sphere') {
           let r = 1;
-          if (args.named.r !== undefined) r = Number(args.named.r);
-          else if (args.named.d !== undefined) r = Number(args.named.d) / 2;
-          else if (args.pos[0] !== undefined) r = Number(args.pos[0]);
-          r = Math.max(0.05, Math.abs(r || 1));
+          if ('r' in args.named) r = Number(args.named.r);
+          else if ('d' in args.named) r = Number(args.named.d) / 2;
+          else if (args.pos.length >= 1) r = Number(args.pos[0]);
+          if (!Number.isFinite(r)) return [];
+          r = safePositive(r, 1);
           const segs = this.getSegments(scope, args.named.$fn !== undefined ? Number(args.named.$fn) : undefined);
           const geom = new THREE.SphereGeometry(r, segs, Math.max(12, Math.round(segs / 2)));
           this.primitiveCount++;
@@ -1844,7 +2061,13 @@ class ScadEvaluator {
         const userMod = this.getMod(scope, name);
         if (userMod) {
           const childList = this.getChildStmtList(st.child);
-          const modScope = this.createChildScope(scope, childList, scope);
+          const modParent = userMod.defScope || scope;
+          const modScope = this.createChildScope(modParent, childList, scope);
+          // Propagate dynamic special vars ($fn, $fa, $fs, $t) from caller scope
+          for (const sv of ['$fn', '$fa', '$fs', '$t']) {
+            const v = this.getVar(scope, sv);
+            if (v !== undefined) modScope.vars[sv] = v;
+          }
           userMod.params.forEach((p, idx) => {
             if (p.name in args.named) modScope.vars[p.name] = args.named[p.name];
             else if (idx < args.pos.length) modScope.vars[p.name] = args.pos[idx];
@@ -2200,7 +2423,12 @@ class ScadEvaluator {
     const userMod = this.getMod(scope, name);
     if (userMod) {
       const childList = this.getChildStmtList(st.child);
-      const modScope = this.createChildScope(scope, childList, scope);
+      const modParent = userMod.defScope || scope;
+      const modScope = this.createChildScope(modParent, childList, scope);
+      for (const sv of ['$fn', '$fa', '$fs', '$t']) {
+        const v = this.getVar(scope, sv);
+        if (v !== undefined) modScope.vars[sv] = v;
+      }
       userMod.params.forEach((p, idx) => {
         if (p.name in args.named) modScope.vars[p.name] = args.named[p.name];
         else if (idx < args.pos.length) modScope.vars[p.name] = args.pos[idx];
@@ -2217,14 +2445,16 @@ class ScadEvaluator {
 /**
  * Evaluates arbitrary OpenSCAD source code into real, accurately positioned,
  * CSG-evaluated Three.js BufferGeometries in OpenSCAD Z-up millimeter space.
+ * Supports multi-file `include <...>` and `use <...>` via `scadLibraries`.
  */
 export function evaluateOpenScadToGeometries(
   scadCode: string,
-  paramOverrides: Record<string, number> = {}
+  paramOverrides: Record<string, number> = {},
+  scadLibraries: Record<string, string> = {}
 ): ScadEvaluationOutput {
   const tokens = tokenizeScad(scadCode);
   const parser = new ScadParser(tokens);
   const ast = parser.parseProgram();
-  const evaluator = new ScadEvaluator(paramOverrides);
+  const evaluator = new ScadEvaluator(paramOverrides, scadLibraries, scadCode);
   return evaluator.evaluateProgram(ast);
 }

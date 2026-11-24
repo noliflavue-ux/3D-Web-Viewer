@@ -193,10 +193,98 @@ test('scadEngine handles hull() and polyhedron() accurately', () => {
   assert.ok(Math.abs(polyBuilt.dimensions.volumeCm3 - 4.0) < 0.1);
 });
 
-test('securityScanner accepts valid 2D/extrusion/rotate_extrude .scad uploads', () => {
+test('securityScanner accepts valid 2D/extrusion/rotate_extrude and pure config.scad uploads', () => {
   const scad2D = `$fn = 64;\nrotate_extrude() translate([12, 0]) circle(r = 4);`;
   const bytes = new TextEncoder().encode(scad2D);
   const report = validateCADUpload('o_ring.scad', bytes, scad2D);
   assert.equal(report.passed, true);
   assert.equal(report.detectedFormat, 'scad');
+
+  // Pure parameter config.scad with zero geometry keywords must ALSO pass security validation
+  const configScad = `// Gemeinsame Parameter\nplatte_breite = 120;\nplatte_tiefe = 60;\nplatte_dicke = 5;\nloch_durchmesser = 8;\n`;
+  const cfgBytes = new TextEncoder().encode(configScad);
+  const cfgReport = validateCADUpload('config.scad', cfgBytes, configScad);
+  assert.equal(cfgReport.passed, true);
+  assert.equal(cfgReport.detectedFormat, 'scad');
+});
+
+test('scadEngine resolves include <config.scad> (vars, functions, modules, relative paths) and reports missing includes', () => {
+  const configScad = `
+    $fn = 48;
+    platte_b = 120;
+    platte_t = 60;
+    platte_h = 5;
+    loch_d = 10;
+    function loch_abstand() = platte_b / 2 - 20;
+  `;
+  const lochschabloneScad = `
+    include <config.scad>
+
+    difference() {
+      cube([platte_b, platte_t, platte_h], center = true);
+      for (sx = [-1, 1]) {
+        translate([sx * loch_abstand(), 0, 0])
+          cylinder(h = platte_h + 4, d = loch_d, center = true);
+      }
+    }
+  `;
+
+  // 1. Without config.scad: reports missingIncludes cleanly and does NOT crash or produce NaN
+  const missingRes = evaluateOpenScadToGeometries(lochschabloneScad);
+  assert.deepEqual(missingRes.missingIncludes, ['config.scad']);
+  assert.equal(missingRes.parts.length, 0);
+
+  // 2. With config.scad provided in libraries: builds exact 120 x 5 x 60 Lochschablone with 2 real CSG holes!
+  const proj = createProjectFromScadCode({
+    name: '02_lochschablone',
+    scadCode: lochschabloneScad,
+    finish: 'titanium',
+  });
+  proj.scadLibraries = { 'config.scad': configScad };
+
+  const built = buildCADAssemblyGroup(proj, true, false);
+  assert.equal(built.dimensions.missingScadIncludes, undefined);
+  assert.deepEqual(built.dimensions.resolvedScadIncludes, ['config.scad']);
+  assert.equal(built.dimensions.width, 120);
+  assert.equal(built.dimensions.height, 5);
+  assert.equal(built.dimensions.depth, 60);
+
+  // Analytical volume = (120*60*5 - 2 * pi * 5^2 * 5) / 1000 = 36.0 - 0.7854 ≈ 35.21 cm³
+  assert.ok(
+    Math.abs(built.dimensions.volumeCm3 - 35.21) < 0.25,
+    `Expected Lochschablone volume ~35.21 cm³, got ${built.dimensions.volumeCm3}`
+  );
+});
+
+test('scadEngine respects use <lib.scad> semantics (imports modules/functions without top-level geometry) and guards circular includes', () => {
+  const libScad = `
+    lib_height = 12;
+    module helper_boss(r) {
+      cylinder(h = lib_height, r = r);
+    }
+    // Top-level demo cube inside lib.scad MUST NOT render when imported via use <...>
+    translate([500, 500, 0]) cube([200, 200, 200]);
+  `;
+  const mainScad = `
+    use <../libs/helpers.scad>
+    helper_boss(15);
+  `;
+
+  const res = evaluateOpenScadToGeometries(mainScad, {}, { 'helpers.scad': libScad });
+  assert.equal(res.missingIncludes.length, 0);
+  assert.equal(res.parts.length, 1);
+
+  const box = getCombinedBox(res.parts);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  // Only the 30x30x12 boss cylinder should exist (NOT the 200x200x200 top-level cube!)
+  assert.ok(Math.abs(size.x - 30) < 0.6);
+  assert.ok(Math.abs(size.y - 30) < 0.6);
+  assert.ok(Math.abs(size.z - 12) < 0.3);
+
+  // Circular include guard: a.scad -> b.scad -> a.scad must terminate safely
+  const circA = `include <b.scad>\ncube([20, 20, 10]);`;
+  const circB = `include <a.scad>\nsize_b = 10;`;
+  const circRes = evaluateOpenScadToGeometries(circA, {}, { 'a.scad': circA, 'b.scad': circB });
+  assert.equal(circRes.parts.length, 1);
 });

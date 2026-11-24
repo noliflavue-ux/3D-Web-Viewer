@@ -16,6 +16,7 @@ import { MessageSquare, CheckCircle2, Ruler, X } from 'lucide-react';
 
 interface CADViewportProps {
   project: CADModelProject;
+  scadLibraries?: Record<string, string>;
   toolMode: ToolMode;
   showDimensions: boolean;
   showCenterOfMass?: boolean;
@@ -47,6 +48,7 @@ const _projVec = new THREE.Vector3();
 
 export const CADViewport: React.FC<CADViewportProps> = ({
   project,
+  scadLibraries,
   toolMode,
   showDimensions,
   showCenterOfMass = false,
@@ -72,6 +74,9 @@ export const CADViewport: React.FC<CADViewportProps> = ({
 
   const projectRef = useRef<CADModelProject>(project);
   projectRef.current = project;
+
+  const scadLibrariesRef = useRef<Record<string, string>>(scadLibraries || {});
+  scadLibrariesRef.current = scadLibraries || {};
 
   const showDimensionsRef = useRef<boolean>(showDimensions);
   showDimensionsRef.current = showDimensions;
@@ -311,6 +316,7 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     const targetCamPos = new THREE.Vector3();
     const targetCamLook = new THREE.Vector3(0, 18, 0);
     let lastFramedProjectId = '';
+    let lastFramedHadGeometry = false;
     const activeModelCenter = new THREE.Vector3(0, 17, 0);
     let activeModelRadius = 48;
 
@@ -712,7 +718,12 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     // Build CAD geometry & pre-warm shaders
     function rebuildModel() {
       cadModelHolder.clear();
-      const built = buildCADAssemblyGroup(projectRef.current, isSoftwareGl, wireframe);
+      const built = buildCADAssemblyGroup(
+        projectRef.current,
+        isSoftwareGl,
+        wireframe,
+        scadLibrariesRef.current
+      );
       cadModelHolder.add(built.group);
       currentComRef.current = built.dimensions.physical?.centerOfMassMm ?? null;
       applyExplodedPositions(currentExploded);
@@ -720,10 +731,16 @@ export const CADViewport: React.FC<CADViewportProps> = ({
       rebuildCenterOfMassGizmo(currentComRef.current);
       rebuildMeasurementLines();
 
-      if (projectRef.current.id !== lastFramedProjectId) {
+      const hasGeometryNow = built.dimensions.triangleCount > 0;
+      const isNewProject = projectRef.current.id !== lastFramedProjectId;
+      const justGainedGeometry = hasGeometryNow && !lastFramedHadGeometry;
+      if (isNewProject || justGainedGeometry) {
         const isFirstLoad = lastFramedProjectId === '';
         lastFramedProjectId = projectRef.current.id;
-        frameCameraToModel(built.group, isFirstLoad);
+        lastFramedHadGeometry = hasGeometryNow;
+        if (hasGeometryNow) {
+          frameCameraToModel(built.group, isFirstLoad || justGainedGeometry);
+        }
       }
 
       onMetricsComputedRef.current(built.dimensions, built.exportPositions);
@@ -990,12 +1007,14 @@ export const CADViewport: React.FC<CADViewportProps> = ({
     };
   }, []);
 
-  // Trigger geometry rebuild when project model, SCAD code, parameters, finish, or wireframe changes
+  // Trigger geometry rebuild when project model, SCAD code, libraries, parameters, finish, or wireframe changes
   useEffect(() => {
     sceneApiRef.current?.rebuildModel();
   }, [
     project.id,
     project.scadCode,
+    project.scadLibraries,
+    scadLibraries,
     project.parameters,
     project.finish,
     project.stlBufferBase64,

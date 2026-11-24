@@ -139,7 +139,9 @@ export function validateCADUpload(
       /(?:\b(cube|cylinder|sphere|polyhedron|square|circle|polygon|union|difference|intersection|hull|minkowski|translate|rotate|scale|mirror|multmatrix|color|resize|offset|linear_extrude|rotate_extrude|projection|surface|text|module|function|for|if|let|include|use|import|echo)\b|\$(fn|fa|fs|t|vpr|vpt|vpd)\b)/i.test(
         sampleText
       );
-    magicBytesValid = !hasNullBytes && hasScadKeywords;
+    // Pure configuration/parameter .scad files (e.g. config.scad) often contain only variable assignments
+    const hasScadAssignment = /^[ \t]*\$?[a-zA-Z_][a-zA-Z0-9_]*[ \t]*=[^=]/m.test(sampleText);
+    magicBytesValid = !hasNullBytes && (hasScadKeywords || hasScadAssignment);
   }
 
   const passed =
